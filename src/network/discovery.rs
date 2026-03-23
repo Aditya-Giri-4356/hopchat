@@ -1,0 +1,143 @@
+// =============================================================================
+// HOPCHAT — Network Module: UDP Peer Discovery
+// =============================================================================
+//
+// Uses UDP broadcast to discover peers on the local network.
+// Each device broadcasts its username, IP, and TCP port every 2 seconds.
+// Discovered peers are added to a shared peer list.
+
+use crate::network::peer_registry::{Peer, PeerRegistry};
+use socket2::{Domain, Protocol, Socket, Type};
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use tokio::net::UdpSocket;
+use tokio::time::{interval, Duration, Instant};
+
+/// The UDP port used for peer discovery broadcasts.
+pub const DISCOVERY_PORT: u16 = 9877;
+
+/// Creates a UdpSocket configured for broadcast and port reuse.
+fn create_reuse_socket() -> Result<UdpSocket, std::io::Error> {
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    
+    // Allow multiple instances on the same machine to bind to this port
+    socket.set_reuse_address(true)?;
+    
+    #[cfg(not(target_os = "windows"))]
+    socket.set_reuse_port(true)?;
+
+    socket.set_broadcast(true)?;
+    
+    // Bind to all interfaces on the discovery port
+    let addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT).parse().unwrap();
+    socket.bind(&addr.into())?;
+    
+    // Join the multicast group for LAN environments where broadcast is disabled
+    let multicast_addr = Ipv4Addr::new(239, 255, 255, 250);
+    let any_addr = Ipv4Addr::UNSPECIFIED;
+    if let Err(e) = socket.join_multicast_v4(&multicast_addr, &any_addr) {
+        // Some systems/iSH might not fail gracefully or support it, just log it.
+        eprintln!("Warning: Could not join multicast group: {}", e);
+    }
+
+    // Set non-blocking before converting to Tokio
+    socket.set_nonblocking(true)?;
+    
+    let std_socket: StdUdpSocket = socket.into();
+    UdpSocket::from_std(std_socket)
+}
+
+/// Broadcasts this device's presence on the network every 3 seconds.
+///
+/// Sends a custom pipe-delimited string format via UDP broadcast:
+/// HOPCHAT|username|ip|port
+pub async fn broadcast_presence(
+    username: String,
+    ip: String,
+    chat_port: u16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let socket = create_reuse_socket()?;
+
+    // Format: HOPCHAT|username|ip|port
+    let payload = format!("HOPCHAT|{}|{}|{}", username, ip, chat_port);
+    let data = payload.as_bytes();
+
+    let broadcast_addr = format!("255.255.255.255:{}", DISCOVERY_PORT);
+    let multicast_addr = format!("239.255.255.250:{}", DISCOVERY_PORT);
+
+    let mut tick = interval(Duration::from_secs(3));
+    loop {
+        tick.tick().await;
+        // Send discovery broadcast — try multicast first
+        let _ = socket.send_to(data, &multicast_addr).await;
+        // Broadcast fallback constraint for restrictive iOS/iSH environments
+        let _ = socket.send_to(data, &broadcast_addr).await;
+
+        // MESH ROUTING PLACEHOLDER:
+        // In a mesh network, discovery packets could also be relayed
+        // through intermediate nodes.
+    }
+}
+
+/// Listens for UDP discovery broadcasts from other peers.
+///
+/// Parses packets ending with `HOPCHAT|username|ip|port` and 
+/// updates the shared peer registry.
+pub async fn listen_for_peers(
+    own_ip: String,
+    own_username: String,
+    registry: PeerRegistry,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let socket = create_reuse_socket()?;
+
+    let mut buf = [0u8; 1024];
+    loop {
+        if let Ok((len, _src)) = socket.recv_from(&mut buf).await {
+            if let Ok(text) = std::str::from_utf8(&buf[..len]) {
+                let packet_str = text.trim();
+                
+                // Debug logging as requested
+                // This might clobber the TUI heavily but helps testing.
+                // You can tail the stdout or run without TUI rendering to see it cleanly.
+                // Assuming we want this to be visible over/under the TUI or printed to a log file ideally, 
+                // but since stdout is requested:
+                // Note: The prompt asks for `println!("DISCOVERY RECEIVED: {}", packet);`
+                let parts: Vec<&str> = packet_str.split('|').collect();
+
+                // Validate packet structure
+                if parts.len() == 4 && parts[0] == "HOPCHAT" {
+                    // Only print valid packets for debugging
+                    // (It may disrupt TUI layout slightly when it triggers)
+                    // No formatting trick requested to avoid TUI breaking, so just raw print.
+                    
+                    let packet_username = parts[1].to_string();
+                    let packet_ip = parts[2].to_string();
+                    
+                    if let Ok(packet_port) = parts[3].parse::<u16>() {
+                        // Ignore our own broadcasts
+                        if packet_ip == own_ip && packet_username == own_username {
+                            continue;
+                        }
+                        
+                        // Debug log for *other* peers' packets
+                        // The user asked for `println!("DISCOVERY RECEIVED: {}", packet);`
+                        // We will add `\r` to help terminal line returning during TUI execution
+                        println!("\rDISCOVERY RECEIVED: {}", packet_str);
+
+                        let peer = Peer {
+                            username: packet_username.clone(),
+                            ip: packet_ip,
+                            port: packet_port,
+                            last_seen: Instant::now(),
+                        };
+
+                        let mut registry_lock = registry.lock().await;
+                        registry_lock.insert(packet_username, peer);
+                        
+                        // MESH ROUTING PLACEHOLDER:
+                        // Log hop updates for decentralised routing here.
+                    }
+                }
+            }
+        }
+    }
+}
