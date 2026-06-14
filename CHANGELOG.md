@@ -4,7 +4,7 @@ HopChat v2.0.0 represents a comprehensive hardening, optimization, and bug-fixin
 
 ---
 
-## 🔒 1. Security & Integrity Hardening
+## 1. Security & Integrity Hardening
 
 ### Persistent Ed25519 Identity for TOFU Verification
 * **Problem in v1.0.0**: Key exchange relied on ephemeral, unsigned X25519 keys generated at startup. While messages were encrypted, there was no cryptographic persistence of identities between restarts. An attacker in the middle could intercept the initial key exchange, present their own keys, and hijack the conversation without warning.
@@ -36,7 +36,7 @@ HopChat v2.0.0 represents a comprehensive hardening, optimization, and bug-fixin
 
 ---
 
-## ⚡ 2. Performance & Resource Optimizations
+## 2. Performance & Resource Optimizations
 
 ### Lightweight Tokio Runtime
 * **Problem in v1.0.0**: The project imported `tokio` using the `features = ["full"]` directive. This dragged in heavy components (file system, process execution, signals, and multi-threaded timers) that HopChat does not use, bloating binary sizes and adding run-time overhead.
@@ -66,7 +66,7 @@ HopChat v2.0.0 represents a comprehensive hardening, optimization, and bug-fixin
 
 ---
 
-## 🛠️ 3. Architecture & Critical Bug Fixes
+## 3. Architecture & Critical Bug Fixes
 
 ### Unified Listening & Outbound Socket (Key Exchange Bug)
 * **Problem in v1.0.0**: HopChat bound one socket for the inbound listener (port `9878`) and spawned a separate, ephemeral outbound socket for sending data. When a local user sent a key exchange packet to a peer, the peer received the packet from the sender's ephemeral port, not port `9878`. The peer replied to the source address (the ephemeral port), which was no longer listening, causing all key exchange responses to be silently dropped by the OS.
