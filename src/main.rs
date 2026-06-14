@@ -74,7 +74,7 @@ pub struct AppState {
 /// Sanitizes input to prevent pipe-injection attacks on the discovery protocol.
 fn prompt_username() -> String {
     print!("\n  ╔══════════════════════════════════╗\n");
-    print!("  ║        HOPCHAT v2.1.0            ║\n");
+    print!("  ║        HOPCHAT v2.1.1            ║\n");
     print!("  ╠══════════════════════════════════╣\n");
     print!("  ║  Enter your username:            ║\n");
     print!("  ╚══════════════════════════════════╝\n");

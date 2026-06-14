@@ -55,29 +55,29 @@ This repository contains two versions of HopChat to preserve development history
 
 ## Installation
 
-### 1. iOS / iSH Terminal (Alpine Linux — i686 32-bit)
+### 1. iOS / iSH Terminal (Alpine Linux — 32-bit x86)
 
-iSH emulates i686 (32-bit x86) Linux. **Compiling Rust directly on iSH is impractical** due to memory constraints and emulation speed. Instead, use a **pre-built static binary**:
+iSH emulates a basic i586-class x86 CPU — it does **not** support SSE/SSE2 instructions. **Compiling Rust directly on iSH is impractical** due to memory constraints and emulation speed. Instead, download a **pre-built static binary** that's compiled without SSE2:
 
 ```bash
-# On iSH: Download the pre-built i686 binary from GitHub Releases
+# On iSH: Download the pre-built iSH-safe binary from GitHub Releases
 apk update && apk add curl
-curl -LO https://github.com/Aditya-Giri-4356/hopchat/releases/latest/download/hopchat-i686-linux-musl
-chmod +x hopchat-i686-linux-musl
-./hopchat-i686-linux-musl
+curl -LO https://github.com/Aditya-Giri-4356/hopchat/releases/latest/download/hopchat-ish
+chmod +x hopchat-ish
+./hopchat-ish
 ```
 
 #### Cross-Compiling for iSH (from macOS/Linux)
-If you want to build the i686 binary yourself, use [cross](https://github.com/cross-rs/cross) (requires Docker):
+If you want to build the iSH binary yourself, use [cross](https://github.com/cross-rs/cross) (requires Docker):
 
 ```bash
 # Install cross (one-time setup)
 cargo install cross
 
-# Build a static i686 binary
-cross build --target i686-unknown-linux-musl --release
+# Build a static i586 binary (no SSE2)
+RUSTFLAGS="-C target-cpu=pentium" cross build --target i586-unknown-linux-musl --release
 
-# The binary is at: target/i686-unknown-linux-musl/release/hopchat
+# The binary is at: target/i586-unknown-linux-musl/release/hopchat
 # Transfer it to your iPhone via AirDrop, iCloud, or scp
 ```
 

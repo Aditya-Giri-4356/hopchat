@@ -2,6 +2,31 @@
 
 ---
 
+## v2.1.1 — iSH Illegal Instruction Fix (SSE2 Removal)
+
+HopChat v2.1.0 binaries crashed immediately on iSH with `Illegal instruction`. This patch completely eliminates SSE/SSE2 instructions from the compiled binary.
+
+### 🐛 Bug Fix
+
+#### Illegal Instruction Crash on iSH
+* **Problem:** The v2.1.0 binary was compiled for the `i686-unknown-linux-musl` target, which enables **SSE2 floating-point** by default. iSH emulates a basic i586-class x86 CPU and does **not** support SSE or SSE2 instructions. Any SSE2 opcode triggers an immediate `Illegal instruction` signal and crash.
+* **Root Cause:** Rust's `i686` target assumes Pentium 4-class features (SSE2). iSH's CPU emulator only supports Pentium-class (i586) instructions — integer x87 FPU only, no SIMD.
+* **Solution:** Switched the CI cross-compilation target from `i686-unknown-linux-musl` to `i586-unknown-linux-musl` and added `RUSTFLAGS="-C target-cpu=pentium"` to force all codegen (including dependencies like `curve25519-dalek` and `chacha20poly1305`) to use only Pentium-compatible instructions.
+
+### 🏗️ Build & Deployment
+
+#### Updated CI Workflow
+* Target changed: `i686-unknown-linux-musl` → `i586-unknown-linux-musl`
+* Added `RUSTFLAGS="-C target-cpu=pentium"` environment variable
+* Binary renamed from `hopchat-i686-linux-musl` to `hopchat-ish` for clarity
+* Release body now includes inline download instructions
+
+#### Updated README & Cross.toml
+* All iSH installation instructions reference the new `hopchat-ish` binary name
+* Cross-compilation docs updated to target `i586-unknown-linux-musl`
+
+---
+
 ## v2.1.0 — iSH / i686 32-bit Alpine Compatibility
 
 HopChat v2.1.0 focuses on **portability**: making the application compile and run on 32-bit i686 Alpine Linux environments like the iSH terminal emulator on iOS.

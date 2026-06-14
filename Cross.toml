@@ -1,2 +1,2 @@
-[target.i686-unknown-linux-musl]
-image = "ghcr.io/cross-rs/i686-unknown-linux-musl:main"
+[target.i586-unknown-linux-musl]
+image = "ghcr.io/cross-rs/i586-unknown-linux-musl:main"
