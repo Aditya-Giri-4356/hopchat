@@ -7,16 +7,17 @@
 // HOPCHAT_MSG|id|sender|receiver|timestamp|content
 
 use crate::crypto::encryption;
+use once_cell::sync::Lazy;
 use rand::Rng;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A thread-safe ID generator for outgoing messages.
 /// Seeded from a random starting point to prevent adversaries from
 /// counting messages by observing sequential ACK IDs on the wire.
-static NEXT_MESSAGE_ID: LazyLock<AtomicU64> = LazyLock::new(|| {
-    AtomicU64::new(rand::thread_rng().gen::<u64>())
+/// Uses AtomicUsize (not AtomicU64) for 32-bit i686 target compatibility.
+static NEXT_MESSAGE_ID: Lazy<AtomicUsize> = Lazy::new(|| {
+    AtomicUsize::new(rand::thread_rng().gen::<usize>())
 });
 
 use serde::{Serialize, Deserialize};
@@ -45,7 +46,7 @@ impl ChatMessage {
             .as_secs();
 
         // Increment the ID generator for each new outgoing message
-        let id = NEXT_MESSAGE_ID.fetch_add(1, Ordering::SeqCst);
+        let id = NEXT_MESSAGE_ID.fetch_add(1, Ordering::SeqCst) as u64;
 
         Self {
             id,

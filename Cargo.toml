@@ -1,13 +1,14 @@
 [package]
 name = "hopchat"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
+rust-version = "1.70.0"
 description = "A terminal-based encrypted peer-to-peer chat system"
 
 [dependencies]
-# Terminal UI
-ratatui = "0.29"
-crossterm = "0.28"
+# Terminal UI (pinned for Rust 1.70+ / i686 Alpine compatibility)
+ratatui = "0.26.1"
+crossterm = "0.27"
 
 # Async runtime (slim: only features we actually use)
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
@@ -34,3 +35,5 @@ sha2 = "0.10.9"
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 dirs = "6.0.0"
 
+# Lazy static initialization (replaces std::sync::LazyLock for Rust <1.80 compat)
+once_cell = "1"

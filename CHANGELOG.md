@@ -1,4 +1,43 @@
-# Changelog — HopChat v2.0.0
+# Changelog
+
+---
+
+## v2.1.0 — iSH / i686 32-bit Alpine Compatibility
+
+HopChat v2.1.0 focuses on **portability**: making the application compile and run on 32-bit i686 Alpine Linux environments like the iSH terminal emulator on iOS.
+
+### 🔧 Compatibility Fixes
+
+#### Replaced `std::sync::LazyLock` with `once_cell::sync::Lazy`
+* **Problem:** `std::sync::LazyLock` was introduced in Rust 1.80.0. Alpine Linux's `apk` package manager ships Rust 1.72 (Alpine 3.19) or older. Attempting to compile HopChat on iSH or any system with Rust < 1.80 resulted in a compilation error.
+* **Solution:** Replaced `LazyLock` with `once_cell::sync::Lazy`, which is functionally identical but works on Rust 1.56+.
+
+#### Replaced `AtomicU64` with `AtomicUsize`
+* **Problem:** On 32-bit i686 targets, `AtomicU64` requires hardware support for 64-bit atomic compare-and-swap (CAS) instructions. While most i686 CPUs support `cmpxchg8b`, the emulation layer in iSH may not reliably provide it, leading to potential `Illegal Instruction` crashes or linker failures.
+* **Solution:** Switched the message ID counter from `AtomicU64` to `AtomicUsize`, which is natively 32-bit on i686 targets. The counter value is cast to `u64` for wire-protocol compatibility, preserving the serialized message format.
+
+#### Pinned `ratatui` to v0.26.1 and `crossterm` to v0.27
+* **Problem:** `ratatui` 0.29 requires Rust 1.74+ (MSRV). Additionally, newer versions introduced API changes (`frame.area()` → `frame.size()`, `set_cursor_position` → `set_cursor`) that don't exist in earlier versions.
+* **Solution:** Pinned `ratatui = "0.26.1"` (MSRV 1.70) and `crossterm = "0.27"`. Updated all API call sites to match the 0.26 interface:
+  - `frame.area()` → `frame.size()`
+  - `frame.set_cursor_position((x, y))` → `frame.set_cursor(x, y)`
+
+#### Set Explicit MSRV (Minimum Supported Rust Version)
+* Added `rust-version = "1.70.0"` to `Cargo.toml` so that `cargo` will produce a clear, actionable error if a user attempts to compile with an incompatible toolchain.
+
+### 🏗️ Build & Deployment
+
+#### GitHub Actions CI for i686 Cross-Compilation
+* Added `.github/workflows/build-ish.yml` — a GitHub Actions workflow that automatically cross-compiles a static `i686-unknown-linux-musl` binary on every tagged release.
+* The binary is published as a GitHub Release artifact, allowing iSH users to download and run it directly without needing to compile Rust on their phone.
+
+#### Updated README with iSH Instructions
+* Replaced the "compile on iSH" instructions with practical steps: download a pre-built i686 static binary from GitHub Releases.
+* Added developer documentation for cross-compiling locally using `cross` + Docker.
+
+---
+
+## v2.0.0 — Hardening, Optimization & Bug Fixes
 
 HopChat v2.0.0 represents a comprehensive hardening, optimization, and bug-fixing release of the terminal-based peer-to-peer encrypted chat application. While maintaining the core ephemeral promise of HopChat (zero disk persistence of chat history, self-destructing data on exit), version 2.0.0 resolves security risks, performance overheads, and packet routing bugs present in the original v1.0.0 codebase.
 

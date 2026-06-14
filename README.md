@@ -55,20 +55,30 @@ This repository contains two versions of HopChat to preserve development history
 
 ## Installation
 
-### 1. iOS / iSH Terminal (Alpine Linux)
-iSH runs a stock Alpine Linux environment. You will need to install Rust and Git via the Alpine package manager (apk).
+### 1. iOS / iSH Terminal (Alpine Linux — i686 32-bit)
+
+iSH emulates i686 (32-bit x86) Linux. **Compiling Rust directly on iSH is impractical** due to memory constraints and emulation speed. Instead, use a **pre-built static binary**:
 
 ```bash
-# Update repositories and install dependencies
-apk update
-apk add git rust cargo build-base
+# On iSH: Download the pre-built i686 binary from GitHub Releases
+apk update && apk add curl
+curl -LO https://github.com/Aditya-Giri-4356/hopchat/releases/latest/download/hopchat-i686-linux-musl
+chmod +x hopchat-i686-linux-musl
+./hopchat-i686-linux-musl
+```
 
-# Clone the repo
-git clone https://github.com/Aditya-Giri-4356/hopchat.git
+#### Cross-Compiling for iSH (from macOS/Linux)
+If you want to build the i686 binary yourself, use [cross](https://github.com/cross-rs/cross) (requires Docker):
 
-# Build the release
-cd hopchat
-cargo build --release
+```bash
+# Install cross (one-time setup)
+cargo install cross
+
+# Build a static i686 binary
+cross build --target i686-unknown-linux-musl --release
+
+# The binary is at: target/i686-unknown-linux-musl/release/hopchat
+# Transfer it to your iPhone via AirDrop, iCloud, or scp
 ```
 
 ### 2. Linux / macOS

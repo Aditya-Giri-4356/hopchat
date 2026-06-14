@@ -74,7 +74,7 @@ pub struct AppState {
 /// Sanitizes input to prevent pipe-injection attacks on the discovery protocol.
 fn prompt_username() -> String {
     print!("\n  ╔══════════════════════════════════╗\n");
-    print!("  ║        HOPCHAT v2.0.0            ║\n");
+    print!("  ║        HOPCHAT v2.1.0            ║\n");
     print!("  ╠══════════════════════════════════╣\n");
     print!("  ║  Enter your username:            ║\n");
     print!("  ╚══════════════════════════════════╝\n");
@@ -253,7 +253,7 @@ async fn run_event_loop(
 
         // --- Render the UI ---
         terminal.draw(|frame| {
-            let app_layout = layout::compute_layout(frame.area());
+            let app_layout = layout::compute_layout(frame.size());
             renderer::render_ui(
                 frame,
                 &app_layout,

@@ -32,7 +32,7 @@ pub fn render_ui(
 
 /// Renders the top header bar.
 fn render_header(frame: &mut Frame, area: Rect) {
-    let header = Paragraph::new(" HOPCHAT v2.0.0")
+    let header = Paragraph::new(" HOPCHAT v2.1.0")
         .style(
             Style::default()
                 .fg(Color::Cyan)
@@ -243,8 +243,8 @@ fn render_input(frame: &mut Frame, area: Rect, input: &str, cursor_pos: usize) {
 
     // Position the cursor in the input box
     // +5 accounts for the border (1) + " >>> " prefix (5)
-    frame.set_cursor_position((
+    frame.set_cursor(
         area.x + 5 + cursor_pos as u16,
         area.y + 1,
-    ));
+    );
 }
