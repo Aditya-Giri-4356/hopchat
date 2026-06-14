@@ -10,7 +10,7 @@ Tactical Deployment: Read about the viability of HOPCHAT in contested Military a
 
 ---
 
-## 📂 Repository Structure & Versions
+## Repository Structure & Versions
 
 This repository contains two versions of HopChat to preserve development history and allow comparison:
 
