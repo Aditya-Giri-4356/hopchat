@@ -83,7 +83,7 @@ pub async fn broadcast_presence(
 /// Parses packets ending with `HOPCHAT|username|ip|port` and 
 /// updates the shared peer registry.
 pub async fn listen_for_peers(
-    _own_ip: String,
+    own_ip: String,
     own_username: String,
     registry: PeerRegistry,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -94,20 +94,34 @@ pub async fn listen_for_peers(
         if let Ok((len, _src)) = socket.recv_from(&mut buf).await {
             if let Ok(text) = std::str::from_utf8(&buf[..len]) {
                 let packet_str = text.trim();
+                
+                // Debug logging as requested
+                // This might clobber the TUI heavily but helps testing.
+                // You can tail the stdout or run without TUI rendering to see it cleanly.
+                // Assuming we want this to be visible over/under the TUI or printed to a log file ideally, 
+                // but since stdout is requested:
+                // Note: The prompt asks for `println!("DISCOVERY RECEIVED: {}", packet);`
                 let parts: Vec<&str> = packet_str.split('|').collect();
 
-                // Validate packet structure: HOPCHAT|username|ip|port
+                // Validate packet structure
                 if parts.len() == 4 && parts[0] == "HOPCHAT" {
+                    // Only print valid packets for debugging
+                    // (It may disrupt TUI layout slightly when it triggers)
+                    // No formatting trick requested to avoid TUI breaking, so just raw print.
+                    
                     let packet_username = parts[1].to_string();
                     let packet_ip = parts[2].to_string();
                     
                     if let Ok(packet_port) = parts[3].parse::<u16>() {
-                        // Ignore our own broadcasts.
-                        // Primary: match IP + username. Secondary: username-only guard
-                        // in case local IP detection returned a different address.
-                        if packet_username == own_username {
+                        // Ignore our own broadcasts
+                        if packet_ip == own_ip && packet_username == own_username {
                             continue;
                         }
+                        
+                        // Debug log for *other* peers' packets
+                        // The user asked for `println!("DISCOVERY RECEIVED: {}", packet);`
+                        // We will add `\r` to help terminal line returning during TUI execution
+                        println!("\rDISCOVERY RECEIVED: {}", packet_str);
 
                         let peer = Peer {
                             username: packet_username.clone(),
@@ -118,6 +132,9 @@ pub async fn listen_for_peers(
 
                         let mut registry_lock = registry.lock().await;
                         registry_lock.insert(packet_username, peer);
+                        
+                        // MESH ROUTING PLACEHOLDER:
+                        // Log hop updates for decentralised routing here.
                     }
                 }
             }

@@ -61,4 +61,15 @@ impl X25519KeyPair {
         Ok(symmetric_key)
     }
 
+    /// Generates a "Trust on First Use" (TOFU) fingerprint.
+    /// This is a truncated SHA-256 hash of the X25519 public key.
+    /// Used by the UI to display a "Security Code" so humans can verify
+    /// non-MITM'd channels out-of-band if necessary.
+    pub fn tofu_fingerprint(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.public.as_bytes());
+        let result = hasher.finalize();
+        let hex = hex::encode(result);
+        hex[..16].to_string()
+    }
 }

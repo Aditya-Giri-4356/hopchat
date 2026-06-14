@@ -7,7 +7,6 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 
@@ -85,18 +84,6 @@ impl LocalIdentity {
             }
         }
         false
-    }
-
-    /// Generates a "Trust on First Use" (TOFU) fingerprint.
-    /// This is a truncated SHA-256 hash of the persistent Ed25519 public key.
-    /// Used by the UI to display a "Security Code" so humans can verify
-    /// non-MITM'd channels out-of-band if necessary.
-    pub fn tofu_fingerprint(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(self.signing_key().verifying_key().to_bytes());
-        let result = hasher.finalize();
-        let hex = hex::encode(result);
-        hex[..16].to_string()
     }
 
     fn get_path() -> PathBuf {

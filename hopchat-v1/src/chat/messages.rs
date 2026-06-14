@@ -7,17 +7,11 @@
 // HOPCHAT_MSG|id|sender|receiver|timestamp|content
 
 use crate::crypto::encryption;
-use rand::Rng;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A thread-safe ID generator for outgoing messages.
-/// Seeded from a random starting point to prevent adversaries from
-/// counting messages by observing sequential ACK IDs on the wire.
-static NEXT_MESSAGE_ID: LazyLock<AtomicU64> = LazyLock::new(|| {
-    AtomicU64::new(rand::thread_rng().gen::<u64>())
-});
+static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
 
 use serde::{Serialize, Deserialize};
 

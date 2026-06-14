@@ -1,11 +1,11 @@
 // =============================================================================
-// HOPCHAT v2.0.0 — Main Entry Point
+// HOPCHAT — Main Entry Point
 // =============================================================================
 //
 // Orchestrates all subsystems:
 //   1. Username login prompt
 //   2. UDP discovery (broadcast + listen)
-//   3. UDP messaging server (incoming encrypted messages)
+//   3. TCP server (incoming messages)
 //   4. TUI event loop (rendering + input + outgoing messages)
 //
 // Uses tokio for async runtime with concurrent tasks.
@@ -35,12 +35,10 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
-/// Default chat port (used as a preferred bind target).
-/// If unavailable, a dynamic port is assigned automatically.
-const PREFERRED_CHAT_PORT: u16 = 9878;
+/// The TCP port used for receiving chat messages.
+const CHAT_PORT: u16 = 9878;
 
 /// Shared application state accessible from multiple async tasks.
 pub struct AppState {
@@ -62,19 +60,14 @@ pub struct AppState {
     pub input_buffer: String,
     /// Cursor position within the input buffer
     pub cursor_pos: usize,
-    /// Shared UDP socket for ALL messaging (send + receive on same port)
-    pub outbound_socket: Arc<UdpSocket>,
-    /// The actual port we are listening on (may differ from PREFERRED_CHAT_PORT)
-    pub chat_port: u16,
     /// Index of the currently selected peer in the friends list
     pub selected_peer: usize,
 }
 
 /// Prompts the user for their username via stdin (before TUI starts).
-/// Sanitizes input to prevent pipe-injection attacks on the discovery protocol.
 fn prompt_username() -> String {
     print!("\n  ╔══════════════════════════════════╗\n");
-    print!("  ║        HOPCHAT v2.0.0            ║\n");
+    print!("  ║        HOPCHAT v1.0.0            ║\n");
     print!("  ╠══════════════════════════════════╣\n");
     print!("  ║  Enter your username:            ║\n");
     print!("  ╚══════════════════════════════════╝\n");
@@ -83,16 +76,7 @@ fn prompt_username() -> String {
 
     let mut username = String::new();
     io::stdin().read_line(&mut username).unwrap();
-
-    // Sanitize: strip pipe characters (would corrupt discovery packets),
-    // remove whitespace, and enforce a max length of 32 characters.
-    let username: String = username
-        .trim()
-        .replace('|', "")
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .take(32)
-        .collect();
+    let username = username.trim().to_string();
 
     if username.is_empty() {
         "anon".to_string()
@@ -111,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|ip| ip.to_string())
         .unwrap_or_else(|_| "127.0.0.1".to_string());
 
-    println!("\n  Starting HOPCHAT as '{}' on {}:{}", username, local_ip, PREFERRED_CHAT_PORT);
+    println!("\n  Starting HOPCHAT as '{}' on {}:{}", username, local_ip, CHAT_PORT);
     println!("  Press any key to enter the chat...");
 
     // Wait for a keypress before entering TUI
@@ -126,37 +110,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dedup_cache: DedupCache = Arc::new(Mutex::new(VecDeque::new()));
     let peer_keys: PeerKeyRegistry = Arc::new(Mutex::new(HashMap::new()));
 
-    // Create a SINGLE shared socket for all messaging (send + receive).
-    // Try the preferred port first; fall back to a dynamic port if taken.
-    let shared_socket = match tokio::net::UdpSocket::bind(format!("0.0.0.0:{}", PREFERRED_CHAT_PORT)).await {
-        Ok(s) => Arc::new(s),
-        Err(_) => Arc::new(tokio::net::UdpSocket::bind("0.0.0.0:0").await?),
-    };
-    let chat_port = shared_socket.local_addr()?.port();
-
     let mut state = AppState {
         username: username.clone(),
         peers: peers.clone(),
         chat_history: chat_history.clone(),
         ack_registry: ack_registry.clone(),
         peer_keys: peer_keys.clone(),
-        outbound_socket: shared_socket.clone(),
         keypair: local_keypair.clone(),
         identity: local_identity.clone(),
         input_buffer: String::new(),
         cursor_pos: 0,
-        chat_port,
         selected_peer: 0,
     };
 
     // --- Step 3: Spawn background network tasks ---
 
-    // UDP discovery: broadcast our presence (with the actual bound port)
+    // UDP discovery: broadcast our presence
     let bcast_username = username.clone();
     let bcast_ip = local_ip.clone();
-    let bcast_port = chat_port;
     tokio::spawn(async move {
-        if let Err(e) = discovery::broadcast_presence(bcast_username, bcast_ip, bcast_port).await {
+        if let Err(e) = discovery::broadcast_presence(bcast_username, bcast_ip, CHAT_PORT).await {
             eprintln!("Discovery broadcast error: {}", e);
         }
     });
@@ -173,7 +146,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // UDP server: receive structured encrypted incoming messages and keys
-    // Uses the SAME shared_socket for both receiving and sending responses.
     let listen_history = chat_history.clone();
     let listen_acks = ack_registry.clone();
     let listen_dedup = dedup_cache.clone();
@@ -181,10 +153,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_keypair = local_keypair.clone();
     let listen_identity = local_identity.clone();
     let listen_username = username.clone();
-    let listen_socket = shared_socket.clone();
     tokio::spawn(async move {
         if let Err(e) = messaging::listen_for_messages(
-            listen_socket, listen_username, listen_history, listen_acks, listen_dedup, listen_peer_keys, listen_keypair, listen_identity
+            CHAT_PORT, listen_username, listen_history, listen_acks, listen_dedup, listen_peer_keys, listen_keypair, listen_identity
         ).await {
             eprintln!("Messaging listen error: {}", e);
         }
@@ -351,9 +322,8 @@ async fn run_event_loop(
                         if let Ok(addr) = peer.socket_addr() {
                             let msg = message;
                             let acks = state.ack_registry.clone();
-                            let socket_clone = state.outbound_socket.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = messaging::send_message_with_retry(socket_clone, addr, &msg, acks, session_key).await {
+                                if let Err(e) = messaging::send_message_with_retry(addr, &msg, acks, session_key).await {
                                     let _ = e;
                                 }
                             });
@@ -375,19 +345,21 @@ async fn run_event_loop(
                                 state.username, pub_x25519, pub_ed25519, sig
                             );
                             
-                            let socket_clone = state.outbound_socket.clone();
                             tokio::spawn(async move {
-                                let _ = messaging::send_raw_packet(&socket_clone, addr, &handshake_packet).await;
+                                let _ = messaging::send_raw_packet(addr, &handshake_packet).await;
                             });
                         }
                         
-                        // Keep the user input so they don't have to retype it.
+                        // Drop the user input for now to force them to wait / resend.
+                        state.input_buffer.clear();
+                        state.cursor_pos = 0;
+
                         // Insert a local system warning into UI showing the TOFU Fingerprint
-                        let tofu_code = state.identity.tofu_fingerprint();
+                        let tofu_code = state.keypair.tofu_fingerprint();
                         let sys_msg = ChatMessage::new(
                             "SYSTEM",
                             &peer.username,
-                            &format!("Key exchange initiated. Your TOFU Security Code is [{}]. Please wait a moment and press Enter again to resend.", tofu_code),
+                            &format!("Key exchange initiated. Your TOFU Security Code is [{}]. Try sending again.", tofu_code),
                         );
                         let mut history_lock = state.chat_history.lock().await;
                         history_lock

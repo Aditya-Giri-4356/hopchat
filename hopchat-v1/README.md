@@ -1,22 +1,12 @@
 # HOPCHAT
 
-**Status: Production-Hardened (v2.0.0)**
+**WIP: This project is currently a work in progress and requires further development and time.**
 
 HOPCHAT is a lightweight, decentralized, deeply encrypted terminal messenger written in Rust. It enables real-time peer-to-peer texting across local networks, isolated WiFi environments, and phone hotspots—no internet access required.
 
 Inspired by the [permissionlesstech/bitchat](https://github.com/permissionlesstech/bitchat) project, HOPCHAT focuses on ultra-fast, offline-first LAN communication, utilizing pure UDP, dynamic X25519 Key Exchange, and XChaCha20-Poly1305 authenticated encryption.
 
 Tactical Deployment: Read about the viability of HOPCHAT in contested Military and DDIL environments here: [MILITARY_USE_CASE.md](MILITARY_USE_CASE.md)
-
----
-
-## 📂 Repository Structure & Versions
-
-This repository contains two versions of HopChat to preserve development history and allow comparison:
-
-*   **HopChat v2 (Root Directory)**: The primary, production-hardened codebase featuring TOFU security identity, optimized Tokio runtime, low stack allocations, unified socket networking, and O(1) decryption caching.
-*   **[HopChat v1 (Legacy)](hopchat-v1/)**: The original proof-of-concept codebase. It remains accessible in the `hopchat-v1/` directory for historical reference, research, or testing.
-*   **[CHANGELOG.md](CHANGELOG.md)**: A deeply detailed technical walkthrough of all changes, optimizations, and bug fixes made between version 1.0.0 and version 2.0.0.
 
 ---
 
@@ -115,15 +105,6 @@ cargo run --release
 ```
 
 You'll be prompted to enter a username. Once supplied, the terminal UI (TUI) will launch and HOPCHAT will automatically discover peers on your network.
-
-### Running the Legacy v1 Version
-
-To run the legacy version 1 of HopChat, navigate to the `hopchat-v1` directory and use Cargo:
-
-```bash
-cd hopchat-v1
-cargo run --release
-```
 
 ### Commands
 

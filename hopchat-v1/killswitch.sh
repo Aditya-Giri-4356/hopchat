@@ -19,16 +19,13 @@ if [ -f "$HOME/.cargo/bin/hopchat" ]; then
     rm -f "$HOME/.cargo/bin/hopchat"
 fi
 
-# 3. Retrieve current directory to delete the source repo safely
-REPO_DIR=$(cd "$(dirname "$0")" && pwd)
+# 3. Retrieve current directory to delete the source repo
+REPO_DIR=$(pwd)
 
 echo "[-] Wiping source repository at $REPO_DIR..."
+cd ..
 
-# 4. Remove persistent identity key
-echo "[-] Removing persistent identity key..."
-rm -f "$HOME/.hopchat_id"
-
-# 5. Self-destruct the folder recursively
+# 4. Self-destruct the folder recursively
 rm -rf "$REPO_DIR"
 
 echo "✅ HOPCHAT HAS BEEN COMPLETELY PURGED FROM THIS SYSTEM."

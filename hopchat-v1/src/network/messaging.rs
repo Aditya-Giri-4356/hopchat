@@ -35,17 +35,16 @@ pub struct TokenBucket {
 
 /// Sends a raw UDP packet (fire-and-forget).
 pub async fn send_raw_packet(
-    socket: &UdpSocket,
     peer_addr: SocketAddr,
     packet_str: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.send_to(packet_str.as_bytes(), &peer_addr).await?;
     Ok(())
 }
 
 /// Sends a structured chat message and retries up to 3 times if no ACK is received.
 pub async fn send_message_with_retry(
-    socket: Arc<UdpSocket>,
     peer_addr: SocketAddr,
     message: &ChatMessage,
     ack_registry: AckRegistry,
@@ -66,7 +65,7 @@ pub async fn send_message_with_retry(
         }
 
         // Send the raw packet
-        if let Err(e) = send_raw_packet(&socket, peer_addr, &packet_str).await {
+        if let Err(e) = send_raw_packet(peer_addr, &packet_str).await {
             eprintln!("Failed to send UDP packet: {}", e);
         }
 
@@ -94,10 +93,8 @@ pub async fn send_message_with_retry(
 }
 
 /// Listens for incoming UDP chat messages, ACKs, and Key exchanges.
-/// Uses the shared socket for both receiving and sending (ACKs, key exchange responses).
-/// This ensures responses are routed back to the correct port.
 pub async fn listen_for_messages(
-    socket: Arc<UdpSocket>,
+    port: u16,
     our_username: String,
     history: ChatHistory,
     ack_registry: AckRegistry,
@@ -106,13 +103,14 @@ pub async fn listen_for_messages(
     local_keypair: Arc<X25519KeyPair>,
     local_identity: Arc<LocalIdentity>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", port)).await?;
+    
     // DoS Mitigation: Map of IP to TokenBucket (Allows 20 packets/sec burst)
     let mut rate_limits: HashMap<IpAddr, TokenBucket> = HashMap::new();
-    let mut ip_to_username: HashMap<IpAddr, String> = HashMap::new();
     let max_tokens = 20.0;
     let refill_rate = 5.0; // Tokens per second
     
-    let mut buf = [0u8; 4096]; // HopChat packets are well under 4KB
+    let mut buf = [0u8; 65535]; // Max UDP packet size
     loop {
         if let Ok((len, src_addr)) = socket.recv_from(&mut buf).await {
             let now = Instant::now();
@@ -172,7 +170,6 @@ pub async fn listen_for_messages(
                                     let mut keys_lock = peer_keys.lock().await;
                                     let already_had_key = keys_lock.contains_key(&sender_username);
                                     keys_lock.insert(sender_username.clone(), derived_key);
-                                    ip_to_username.insert(ip, sender_username.clone());
 
                                     // Send our key back to complete the handshake if we didn't have theirs
                                     if !already_had_key {
@@ -184,7 +181,8 @@ pub async fn listen_for_messages(
                                             "HOPCHAT_KEY|{}|{}|{}|{}",
                                             our_username, pub_x25519, pub_ed25519, sig
                                         );
-                                        let _ = socket.send_to(handshake_packet.as_bytes(), &src_addr).await;
+                                        let socket_clone = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+                                        let _ = socket_clone.send_to(handshake_packet.as_bytes(), &src_addr).await;
                                     }
                                 }
                             } else {
@@ -200,47 +198,29 @@ pub async fn listen_for_messages(
                     if parts.len() != 2 { continue; }
                     
                     // We must determine WHO sent this since the sender is encrypted inside the payload.
-                    // Use IP-to-Session Cache first for O(1) decryption
-                    let mut decrypted_msg = None;
-                    let mut matched_username = None;
-
+                    // For now, trial decryption against all active session keys.
+                    // (In v2.1 this could be optimized by mapping IpAddr back to Session keys)
                     let session_keys = {
                         let keys_lock = peer_keys.lock().await;
                         keys_lock.clone()
                     };
 
-                    if let Some(username) = ip_to_username.get(&ip) {
-                        if let Some(key) = session_keys.get(username) {
-                            if let Some(msg) = ChatMessage::from_packet_string(packet_str, key) {
-                                decrypted_msg = Some(msg);
-                                matched_username = Some(username.clone());
-                            }
-                        }
-                    }
+                    for (peer_username, key) in session_keys {
+                        if let Some(msg) = ChatMessage::from_packet_string(packet_str, &key) {
+                            let msg_id = msg.id;
+                            
+                            // Send an ACK back to the sender
+                            let ack_packet = format!("HOPCHAT_ACK|{}", msg_id);
+                            let socket_clone = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+                            let _ = socket_clone.send_to(ack_packet.as_bytes(), &src_addr).await;
 
-                    // Fallback to O(N) trial decryption if IP cache misses
-                    if decrypted_msg.is_none() {
-                        for (peer_username, key) in &session_keys {
-                            if let Some(msg) = ChatMessage::from_packet_string(packet_str, key) {
-                                decrypted_msg = Some(msg);
-                                matched_username = Some(peer_username.clone());
-                                // Update cache for future O(1) lookups
-                                ip_to_username.insert(ip, peer_username.clone());
+                            // Check deduplication cache
+                            let mut cache = dedup_cache.lock().await;
+                            if cache.contains(&msg_id) {
+                                // Already processed this message
                                 break;
                             }
-                        }
-                    }
 
-                    if let (Some(msg), Some(peer_username)) = (decrypted_msg, matched_username) {
-                        let msg_id = msg.id;
-                        
-                        // Send an ACK back to the sender
-                        let ack_packet = format!("HOPCHAT_ACK|{}", msg_id);
-                        let _ = socket.send_to(ack_packet.as_bytes(), &src_addr).await;
-
-                        // Check deduplication cache
-                        let mut cache = dedup_cache.lock().await;
-                        if !cache.contains(&msg_id) {
                             // Add to cache
                             if cache.len() >= 500 {
                                 cache.pop_front();
@@ -253,6 +233,9 @@ pub async fn listen_for_messages(
                                 .entry(peer_username)
                                 .or_insert_with(Vec::new)
                                 .push(msg);
+                                
+                            // Successfully decrypted, stop trying other keys
+                            break;
                         }
                     }
                 }
