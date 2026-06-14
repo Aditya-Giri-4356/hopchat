@@ -182,9 +182,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_identity = local_identity.clone();
     let listen_username = username.clone();
     let listen_socket = shared_socket.clone();
+    let listen_peers = peers.clone();
     tokio::spawn(async move {
         if let Err(e) = messaging::listen_for_messages(
-            listen_socket, listen_username, listen_history, listen_acks, listen_dedup, listen_peer_keys, listen_keypair, listen_identity
+            listen_socket, listen_username, listen_history, listen_acks, listen_dedup, listen_peer_keys, listen_keypair, listen_identity, listen_peers
         ).await {
             eprintln!("Messaging listen error: {}", e);
         }

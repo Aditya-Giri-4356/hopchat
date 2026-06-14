@@ -81,22 +81,78 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> bool {
             if parts.len() < 2 {
                 push_system_msg("Usage: /connect <ip>");
             } else {
-                let target_ip = parts[1];
-                push_system_msg(&format!("Attempting manual connection to {}...", target_ip));
+                let target_ip = parts[1].to_string();
+                push_system_msg(&format!("Connecting to {}...", target_ip));
 
-                // Send a direct unicast discovery packet
-                // FORMAT: HOPCHAT|username|ip|port
-                let target_addr = format!("{}:{}", target_ip, crate::network::discovery::DISCOVERY_PORT);
-                
                 let my_ip = local_ip_address::local_ip()
                     .map(|ip| ip.to_string())
                     .unwrap_or_else(|_| "127.0.0.1".to_string());
-                let payload = format!("HOPCHAT|{}|{}|{}", state.username, my_ip, state.chat_port);
+
+                // Build discovery payload
+                let discovery_payload = format!(
+                    "HOPCHAT|{}|{}|{}",
+                    state.username, my_ip, state.chat_port
+                );
+
+                // Build key exchange handshake payload
+                let pub_x25519 = state.keypair.public_key_hex();
+                let pub_ed25519 = state.identity.public_key_hex();
+                let sig = state.identity.sign_payload(pub_x25519.as_bytes());
+                let key_payload = format!(
+                    "HOPCHAT_KEY|{}|{}|{}|{}",
+                    state.username, pub_x25519, pub_ed25519, sig
+                );
+
+                // Target addresses: both discovery port AND chat port
+                let discovery_port = crate::network::discovery::DISCOVERY_PORT;
+                let chat_port = crate::PREFERRED_CHAT_PORT;
+                let target_discovery = format!("{}:{}", target_ip, discovery_port);
+                let target_chat = format!("{}:{}", target_ip, chat_port);
 
                 let socket = state.outbound_socket.clone();
+                let disc_payload = discovery_payload.clone();
+                let key_pay = key_payload.clone();
+                let t_disc = target_discovery.clone();
+                let t_chat = target_chat.clone();
+
+                // Send discovery + key exchange to BOTH ports
                 tokio::spawn(async move {
-                    let _ = socket.send_to(payload.as_bytes(), target_addr).await;
+                    // Discovery to discovery port
+                    let _ = socket.send_to(disc_payload.as_bytes(), &t_disc).await;
+                    // Discovery to chat port (in case discovery socket isn't bound)
+                    let _ = socket.send_to(disc_payload.as_bytes(), &t_chat).await;
+                    // Key exchange to chat port
+                    let _ = socket.send_to(key_pay.as_bytes(), &t_chat).await;
+                    // Key exchange to discovery port (fallback)
+                    let _ = socket.send_to(key_pay.as_bytes(), &t_disc).await;
+
+                    // Retry after a short delay to increase reliability
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let _ = socket.send_to(disc_payload.as_bytes(), &t_disc).await;
+                    let _ = socket.send_to(disc_payload.as_bytes(), &t_chat).await;
+                    let _ = socket.send_to(key_pay.as_bytes(), &t_chat).await;
+                    let _ = socket.send_to(key_pay.as_bytes(), &t_disc).await;
                 });
+
+                // Immediately register the target as a peer so the UI shows them
+                // (they'll get properly updated once discovery/key exchange completes)
+                {
+                    let mut peers_lock = state.peers.lock().await;
+                    let peer_name = format!("{}:{}", target_ip, chat_port);
+                    peers_lock.entry(peer_name.clone()).or_insert_with(|| {
+                        crate::network::peer_registry::Peer {
+                            username: peer_name,
+                            ip: target_ip.clone(),
+                            port: chat_port,
+                            last_seen: tokio::time::Instant::now(),
+                        }
+                    });
+                }
+
+                push_system_msg(&format!(
+                    "Sent discovery + key exchange to {}:{} and {}:{}. Waiting for response...",
+                    target_ip, discovery_port, target_ip, chat_port
+                ));
             }
         }
         _ => {

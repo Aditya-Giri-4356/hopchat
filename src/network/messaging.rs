@@ -9,6 +9,7 @@
 
 use crate::chat::messages::ChatMessage;
 use crate::crypto::key_exchange::X25519KeyPair;
+use crate::network::peer_registry::{Peer, PeerRegistry};
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -93,9 +94,9 @@ pub async fn send_message_with_retry(
     }
 }
 
-/// Listens for incoming UDP chat messages, ACKs, and Key exchanges.
+/// Listens for incoming UDP chat messages, ACKs, Key exchanges, and discovery packets.
 /// Uses the shared socket for both receiving and sending (ACKs, key exchange responses).
-/// This ensures responses are routed back to the correct port.
+/// Also handles HOPCHAT discovery packets that arrive on the chat port (from /connect).
 pub async fn listen_for_messages(
     socket: Arc<UdpSocket>,
     our_username: String,
@@ -105,6 +106,7 @@ pub async fn listen_for_messages(
     peer_keys: PeerKeyRegistry,
     local_keypair: Arc<X25519KeyPair>,
     local_identity: Arc<LocalIdentity>,
+    peer_registry: PeerRegistry,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // DoS Mitigation: Map of IP to TokenBucket (Allows 20 packets/sec burst)
     let mut rate_limits: HashMap<IpAddr, TokenBucket> = HashMap::new();
@@ -138,7 +140,27 @@ pub async fn listen_for_messages(
             if let Ok(text) = std::str::from_utf8(&buf[..len]) {
                 let packet_str = text.trim();
 
-                if packet_str.starts_with("HOPCHAT_ACK|") {
+                // Handle discovery packets that arrive on the chat socket
+                // (sent by /connect which targets both ports)
+                if packet_str.starts_with("HOPCHAT|") && !packet_str.starts_with("HOPCHAT_") {
+                    let parts: Vec<&str> = packet_str.split('|').collect();
+                    if parts.len() == 4 && parts[0] == "HOPCHAT" {
+                        let peer_username = parts[1].to_string();
+                        let peer_ip = parts[2].to_string();
+                        if let Ok(peer_port) = parts[3].parse::<u16>() {
+                            if peer_username != our_username {
+                                let peer = Peer {
+                                    username: peer_username.clone(),
+                                    ip: peer_ip,
+                                    port: peer_port,
+                                    last_seen: tokio::time::Instant::now(),
+                                };
+                                let mut reg = peer_registry.lock().await;
+                                reg.insert(peer_username, peer);
+                            }
+                        }
+                    }
+                } else if packet_str.starts_with("HOPCHAT_ACK|") {
                     // Handle ACK receipt
                     let parts: Vec<&str> = packet_str.split('|').collect();
                     if parts.len() == 2 {
