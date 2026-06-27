@@ -21,8 +21,19 @@ pub struct LocalIdentity {
 
 impl LocalIdentity {
     /// Loads the identity from `~/.hopchat_id` or creates a new one
-    pub fn load_or_create(username: &str) -> Self {
-        let path = Self::get_path();
+    pub fn load_or_create(raw_username: &str) -> Self {
+        // Defense-in-Depth: Sanitize even if the caller already did.
+        let safe_username: String = raw_username.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+            
+        let username = if safe_username.is_empty() {
+            "anon".to_string()
+        } else {
+            safe_username
+        };
+
+        let path = Self::get_path(&username);
 
         if path.exists() {
             if let Ok(data) = fs::read_to_string(&path) {
@@ -99,9 +110,9 @@ impl LocalIdentity {
         hex[..16].to_string()
     }
 
-    fn get_path() -> PathBuf {
+    fn get_path(username: &str) -> PathBuf {
         let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        path.push(".hopchat_id");
+        path.push(format!(".hopchat_id_{}", username));
         path
     }
 
@@ -112,14 +123,13 @@ impl LocalIdentity {
                 use std::os::unix::fs::OpenOptionsExt;
                 let mut options = std::fs::OpenOptions::new();
                 options.write(true).create(true).truncate(true).mode(0o600);
-                if let Ok(mut file) = options.open(Self::get_path()) {
-                    use std::io::Write;
-                    let _ = file.write_all(json.as_bytes());
+                if let Ok(mut file) = options.open(Self::get_path(&self.username)) {
+                    let _ = std::io::Write::write_all(&mut file, json.as_bytes());
                 }
             }
             #[cfg(not(unix))]
             {
-                let _ = std::fs::write(Self::get_path(), json);
+                let _ = fs::write(Self::get_path(&self.username), json);
             }
         }
     }

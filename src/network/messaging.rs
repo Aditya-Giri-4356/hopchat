@@ -150,14 +150,30 @@ pub async fn listen_for_messages(
                         let peer_ip = parts[2].to_string();
                         if let Ok(peer_port) = parts[3].parse::<u16>() {
                             if peer_username != our_username {
-                                let peer = Peer {
-                                    username: peer_username.clone(),
-                                    ip: peer_ip,
-                                    port: peer_port,
-                                    last_seen: tokio::time::Instant::now(),
-                                };
                                 let mut reg = peer_registry.lock().await;
-                                reg.insert(peer_username, peer);
+                                
+                                // DoS Protection: Cap the maximum number of tracked peers
+                                if reg.len() >= 1000 && !reg.contains_key(&peer_username) {
+                                    continue; // Drop new peer discovery if registry is full
+                                }
+
+                                // MITM/Hijack Protection: Do not allow unauthenticated UDP 
+                                // discovery packets to hijack the routing of a known, pinned peer.
+                                // The IP/Port should only be updated if a cryptographically signed 
+                                // Key Exchange (HOPCHAT_KEY) validates the new IP.
+                                if let Some(existing_peer) = reg.get_mut(&peer_username) {
+                                    // Only update last_seen, DO NOT update IP/Port from unauthenticated broadcast
+                                    existing_peer.last_seen = tokio::time::Instant::now();
+                                } else {
+                                    // New peer, add to registry temporarily
+                                    let peer = Peer {
+                                        username: peer_username.clone(),
+                                        ip: peer_ip,
+                                        port: peer_port,
+                                        last_seen: tokio::time::Instant::now(),
+                                    };
+                                    reg.insert(peer_username, peer);
+                                }
                             }
                         }
                     }
@@ -243,8 +259,15 @@ pub async fn listen_for_messages(
                 } else if packet_str.starts_with("HOPCHAT_MSG|") {
                     // Handle Encrypted Message receipt (Masked Metadata)
                     // The payload format is just HOPCHAT_MSG|<hex_ciphertext>
-                    let parts: Vec<&str> = packet_str.splitn(2, '|').collect();
-                    if parts.len() != 2 { continue; }
+                    let ciphertext_hex = &packet_str["HOPCHAT_MSG|".len()..];
+                    
+                    // Strict Length Bounds Validation (Cryptographic Downgrade Fix)
+                    // A valid hex payload must be even in length, and realistically 
+                    // at least 32 bytes long (nonce + tag + minimal ciphertext)
+                    if ciphertext_hex.len() % 2 != 0 || ciphertext_hex.len() < 32 || ciphertext_hex.len() > 8192 {
+                        eprintln!("SECURITY: Rejected malformed HOPCHAT_MSG payload (invalid length).");
+                        continue;
+                    }
                     
                     // We must determine WHO sent this since the sender is encrypted inside the payload.
                     // Use IP-to-Session Cache first for O(1) decryption

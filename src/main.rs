@@ -85,13 +85,12 @@ fn prompt_username() -> String {
     let mut username = String::new();
     io::stdin().read_line(&mut username).unwrap();
 
-    // Sanitize: strip pipe characters (would corrupt discovery packets),
-    // remove whitespace, and enforce a max length of 32 characters.
+    // Sanitize: strictly alphanumeric and underscores to prevent Path Traversal
+    // (e.g., ../../../etc/shadow) and shell injection attacks. Enforce a max length of 32.
     let username: String = username
         .trim()
-        .replace('|', "")
         .chars()
-        .filter(|c| !c.is_whitespace())
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
         .take(32)
         .collect();
 
