@@ -331,10 +331,12 @@ async fn run_event_loop(
                         // Add to our local chat history
                         {
                             let mut history_lock = state.chat_history.lock().await;
-                            history_lock
+                            
+                            let list = history_lock
                                 .entry(peer.username.clone())
-                                .or_insert_with(Vec::new)
-                                .push(message.clone());
+                                .or_insert_with(Vec::new);
+                            list.push(message.clone());
+                            if list.len() > 1000 { list.remove(0); }
                                 
                             // Add a purely local UI indication of secure transit
                             let secure_ux_msg = ChatMessage::new(
@@ -342,10 +344,8 @@ async fn run_event_loop(
                                 &peer.username,
                                 "Sent (Encrypted ✓)",
                             );
-                            history_lock
-                                .entry(peer.username.clone())
-                                .or_insert_with(Vec::new)
-                                .push(secure_ux_msg);
+                            list.push(secure_ux_msg);
+                            if list.len() > 1000 { list.remove(0); }
                         }
 
                         // Send to the peer asynchronously via reliable encrypted structured UDP
@@ -391,10 +391,11 @@ async fn run_event_loop(
                             &format!("Key exchange initiated. Your TOFU Security Code is [{}]. Please wait a moment and press Enter again to resend.", tofu_code),
                         );
                         let mut history_lock = state.chat_history.lock().await;
-                        history_lock
+                        let list = history_lock
                             .entry(peer.username.clone())
-                            .or_insert_with(Vec::new)
-                            .push(sys_msg);
+                            .or_insert_with(Vec::new);
+                        list.push(sys_msg);
+                        if list.len() > 1000 { list.remove(0); }
                     }
                     }
                 }

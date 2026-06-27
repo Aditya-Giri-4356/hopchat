@@ -52,7 +52,7 @@ pub async fn send_message_with_retry(
     ack_registry: AckRegistry,
     key: [u8; 32],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let packet_str = message.to_packet_string(&key);
+    let packet_str = message.to_packet_string(&key)?;
 
     let retry_limit = 3;
     let mut attempt = 0;
@@ -293,10 +293,13 @@ pub async fn listen_for_messages(
 
                             // Safe to add to chat history now
                             let mut history_lock = history.lock().await;
-                            history_lock
+                            let list = history_lock
                                 .entry(peer_username)
-                                .or_insert_with(Vec::new)
-                                .push(msg);
+                                .or_insert_with(Vec::new);
+                            list.push(msg);
+                            if list.len() > 1000 {
+                                list.remove(0);
+                            }
                         }
                     }
                 }

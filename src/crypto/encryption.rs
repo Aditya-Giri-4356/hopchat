@@ -16,7 +16,7 @@ use rand::RngCore;
 
 /// Encrypts a plaintext string and returns a hex-encoded string containing
 /// the nonce and ciphertext.
-pub fn encrypt_message(key: &[u8; 32], plaintext: &str) -> String {
+pub fn encrypt_message(key: &[u8; 32], plaintext: &str) -> Result<String, String> {
     let cipher = XChaCha20Poly1305::new(key.into());
 
     // Generate a random 24-byte nonce (XNonce)
@@ -28,7 +28,7 @@ pub fn encrypt_message(key: &[u8; 32], plaintext: &str) -> String {
     // Aead::encrypt returns Ciphertext + MAC
     let ciphertext = cipher
         .encrypt(nonce, plaintext.as_bytes())
-        .expect("Encryption failed");
+        .map_err(|e| format!("Encryption failed: {}", e))?;
 
     // Prepend the 24-byte nonce to the ciphertext
     let mut combined = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
@@ -36,7 +36,7 @@ pub fn encrypt_message(key: &[u8; 32], plaintext: &str) -> String {
     combined.extend_from_slice(&ciphertext);
 
     // Encode to a hex string for safe transmission over UDP string packets
-    hex::encode(combined)
+    Ok(hex::encode(combined))
 }
 
 /// Decrypts a hex-encoded string containing the nonce and ciphertext,

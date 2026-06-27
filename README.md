@@ -167,9 +167,9 @@ This will forcefully uninstall hopchat from the Cargo package manager and then p
 
 ## Roadmap
 
-- v1.2 - File Transfers: Base64 binary chunking to allow for direct encrypted file transfer over UDP. 
-- v1.3 - Bluetooth LE Discovery: Bypassing the WiFi chip entirely for true zero-net connectivity.
-- v2.0 - Mesh Relay: Decentralized packet hopping. If A can see B, and B can see C, A can message C purely through the HOPCHAT physical geometry.
+- **Hybrid Bluetooth Low Energy (BLE) Transport**: We plan to implement concurrent BLE and UDP P2P networking using the `blew` crate. This will allow true zero-net connectivity by acting as both a BLE Central and Peripheral, leveraging opportunistic L2CAP CoC for high-speed socket-like P2P communication when WiFi is entirely absent.
+- **File Transfers**: Base64 binary chunking to allow for direct encrypted file transfer over UDP and BLE. 
+- **Mesh Relay**: Decentralized packet hopping. If A can see B, and B can see C, A can message C purely through the HOPCHAT physical geometry.
 
 ---
 

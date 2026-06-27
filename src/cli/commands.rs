@@ -38,10 +38,11 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> bool {
         let target_clone = target.clone();
         tokio::spawn(async move {
             let mut history_lock = history.lock().await;
-            history_lock
+            let list = history_lock
                 .entry(target_clone)
-                .or_insert_with(Vec::new)
-                .push(sys_msg);
+                .or_insert_with(Vec::new);
+            list.push(sys_msg);
+            if list.len() > 1000 { list.remove(0); }
         });
     };
 

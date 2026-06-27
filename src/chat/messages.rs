@@ -61,10 +61,10 @@ impl ChatMessage {
     /// and returns the HOPCHAT_MSG pipe-delimited boundary format.
     /// This completely masks routing metadata (sender, receiver, id, timestamp)
     /// from the local network.
-    pub fn to_packet_string(&self, key: &[u8; 32]) -> String {
+    pub fn to_packet_string(&self, key: &[u8; 32]) -> Result<String, String> {
         let json_payload = serde_json::to_string(self).unwrap_or_default();
-        let ciphertext_hex = encryption::encrypt_message(key, &json_payload);
-        format!("HOPCHAT_MSG|{}", ciphertext_hex)
+        let ciphertext_hex = encryption::encrypt_message(key, &json_payload)?;
+        Ok(format!("HOPCHAT_MSG|{}", ciphertext_hex))
     }
 
     /// Deserializes a ChatMessage from the HOPCHAT_MSG pipe-delimited format,

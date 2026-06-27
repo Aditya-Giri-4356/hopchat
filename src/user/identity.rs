@@ -107,7 +107,20 @@ impl LocalIdentity {
 
     fn save(&self) {
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(Self::get_path(), json);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true).mode(0o600);
+                if let Ok(mut file) = options.open(Self::get_path()) {
+                    use std::io::Write;
+                    let _ = file.write_all(json.as_bytes());
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = std::fs::write(Self::get_path(), json);
+            }
         }
     }
 }
