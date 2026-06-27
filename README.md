@@ -55,62 +55,60 @@ This repository contains two versions of HopChat to preserve development history
 
 ## Installation
 
-### 1. iOS / iSH Terminal (Alpine Linux — 32-bit x86)
+### The Quick Way (Recommended)
 
-iSH emulates a basic i586-class x86 CPU — it does **not** support SSE/SSE2 instructions. **Compiling Rust directly on iSH is impractical** due to memory constraints and emulation speed. Instead, download a **pre-built static binary** that's compiled without SSE2:
+Run the following command in your terminal (works on macOS, Linux, iPhone iSH, and Android Termux):
 
 ```bash
-# On iSH: Download the pre-built iSH-safe binary from GitHub Releases
+curl -fsSL https://raw.githubusercontent.com/Aditya-Giri-4356/hopchat/master/install.sh | sh
+```
+
+This script automatically detects your platform, installs any missing dependencies (like Rust/Clang on Termux, or curl on iSH), downloads the correct pre-built binary (or compiles it from source), and places it in your system's `$PATH`. 
+
+Once installed, you can launch HopChat from **any directory** simply by typing:
+```bash
+hopchat
+```
+
+---
+
+### Manual Installation (Alternative)
+
+#### 1. iOS / iSH Terminal (Alpine Linux — 32-bit x86)
+
+iSH emulates a basic i586-class x86 CPU — it does **not** support SSE/SSE2 instructions. Instead of compiling directly on iSH, you can manually download the pre-compiled binary:
+
+```bash
 apk update && apk add curl
 curl -LO https://github.com/Aditya-Giri-4356/hopchat/releases/latest/download/hopchat-ish
 chmod +x hopchat-ish
-./hopchat-ish
+mv hopchat-ish /usr/local/bin/hopchat
+hopchat
 ```
 
-#### Cross-Compiling for iSH (from macOS/Linux)
-If you want to build the iSH binary yourself, use [cross](https://github.com/cross-rs/cross) (requires Docker):
-
+#### 2. Android Termux
+If you want to manually install it via Cargo on Termux:
 ```bash
-# Install cross (one-time setup)
-cargo install cross
-
-# Build a static i586 binary (no SSE2)
-RUSTFLAGS="-C target-cpu=pentium" cross build --target i586-unknown-linux-musl --release
-
-# The binary is at: target/i586-unknown-linux-musl/release/hopchat
-# Transfer it to your iPhone via AirDrop, iCloud, or scp
+pkg update
+pkg install -y rust clang git
+cargo install --git https://github.com/Aditya-Giri-4356/hopchat.git --root "$PREFIX"
+hopchat
 ```
 
-### 2. Linux / macOS
-On standard UNIX systems, use rustup to install the latest toolchain.
-
+#### 3. Linux / macOS (From Source)
 ```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
 # Clone and Build
 git clone https://github.com/Aditya-Giri-4356/hopchat.git
 cd hopchat
 cargo build --release
+cp target/release/hopchat /usr/local/bin/ # Optional: copy to path
 ```
 
-### 3. Windows
-Download and install [Rustup for Windows](https://rustup.rs/), install Git, and then run in PowerShell:
-```powershell
-git clone https://github.com/Aditya-Giri-4356/hopchat.git
-cd hopchat
-cargo build --release
-```
-
-### 4. Package Manager (Global Install)
-Because HOPCHAT is written in Rust, the easiest cross-platform package manager installation method is to use cargo install. This will automatically download, compile, and place the hopchat binary onto your system $PATH:
-
+#### 4. Package Manager (Global Cargo Install)
 ```bash
 cargo install --git https://github.com/Aditya-Giri-4356/hopchat.git
 ```
-*Note: Ensure ~/.cargo/bin is in your environment PATH.*
-
-(Native OS package manager integration via Homebrew, APT, and APK will be made possible soon).
+*Note: Ensure `~/.cargo/bin` is in your environment PATH.*
 
 ---
 
