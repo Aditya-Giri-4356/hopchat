@@ -26,7 +26,7 @@ if [ -n "$TERMUX_VERSION" ] || [ -d "/data/data/com.termux" ]; then
     pkg install -y rust clang git
 
     echo "[+] Building HopChat from source and installing to Termux path..."
-    cargo install --git https://github.com/Aditya-Giri-4356/hopchat.git --root "$PREFIX" --force
+    cargo install --git https://github.com/Aditya-Giri-4356/hopchat.git hopchat --root "$PREFIX" --force
 
     echo "------------------------------------------------"
     echo "✅ HOPCHAT INSTALLED SUCCESSFULLY!"
@@ -75,7 +75,7 @@ else
     
     if command_exists cargo; then
         echo "[+] Compiling and installing HopChat via Cargo..."
-        cargo install --git https://github.com/Aditya-Giri-4356/hopchat.git --force
+        cargo install --git https://github.com/Aditya-Giri-4356/hopchat.git hopchat --force
         
         echo "------------------------------------------------"
         echo "✅ HOPCHAT INSTALLED SUCCESSFULLY!"
