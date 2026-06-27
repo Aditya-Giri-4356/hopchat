@@ -2,6 +2,9 @@
 
 **Status: Production-Hardened (v2.0.0)**
 
+> [!NOTE]
+> **AI Development Disclaimer**: This project was 99% developed with AI assistance. While it has been audited and hardened with strong security controls, bugs, performance edge cases, and unexpected behaviors are to be expected. Use with appropriate care.
+
 HOPCHAT is a lightweight, decentralized, deeply encrypted terminal messenger written in Rust. It enables real-time peer-to-peer texting across local networks, isolated WiFi environments, and phone hotspots—no internet access required.
 
 Inspired by the [permissionlesstech/bitchat](https://github.com/permissionlesstech/bitchat) project, HOPCHAT focuses on ultra-fast, offline-first LAN communication, utilizing pure UDP, dynamic X25519 Key Exchange, and XChaCha20-Poly1305 authenticated encryption.
