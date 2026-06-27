@@ -8,7 +8,8 @@ description = "A terminal-based encrypted peer-to-peer chat system"
 [dependencies]
 # Terminal UI (pinned for Rust 1.70+ / i686 Alpine compatibility)
 ratatui = "0.26.1"
-crossterm = "0.27"
+crossterm = { version = "0.27", features = ["event-stream"] }
+futures = "0.3"
 
 # Async runtime (slim: only features we actually use)
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }

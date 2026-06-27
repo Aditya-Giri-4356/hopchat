@@ -26,6 +26,7 @@ use network::peer_registry::{Peer, PeerRegistry};
 use user::identity::LocalIdentity;
 
 use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture, EventStream},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -224,6 +225,8 @@ async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut event_stream = EventStream::new();
+    
     loop {
 
         // --- Get current peer list snapshot ---
@@ -267,8 +270,8 @@ async fn run_event_loop(
             );
         })?;
 
-        // --- Poll for keyboard input (50ms timeout for responsiveness) ---
-        let action = input::poll_input(Duration::from_millis(50));
+        // --- Asynchronously poll for keyboard input (50ms timeout) ---
+        let action = input::next_input_event(&mut event_stream, Duration::from_millis(50)).await;
 
         match action {
             input::InputAction::Quit => break,

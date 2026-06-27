@@ -9,15 +9,15 @@
 use crate::crypto::encryption;
 use once_cell::sync::Lazy;
 use rand::Rng;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A thread-safe ID generator for outgoing messages.
 /// Seeded from a random starting point to prevent adversaries from
 /// counting messages by observing sequential ACK IDs on the wire.
-/// Uses AtomicUsize (not AtomicU64) for 32-bit i686 target compatibility.
-static NEXT_MESSAGE_ID: Lazy<AtomicUsize> = Lazy::new(|| {
-    AtomicUsize::new(rand::thread_rng().gen::<usize>())
+/// Uses Mutex<u64> to enforce 64-bit uniqueness on 32-bit i686 targets.
+static NEXT_MESSAGE_ID: Lazy<Mutex<u64>> = Lazy::new(|| {
+    Mutex::new(rand::thread_rng().gen::<u64>())
 });
 
 use serde::{Serialize, Deserialize};
@@ -46,7 +46,12 @@ impl ChatMessage {
             .as_secs();
 
         // Increment the ID generator for each new outgoing message
-        let id = NEXT_MESSAGE_ID.fetch_add(1, Ordering::SeqCst) as u64;
+        let id = {
+            let mut lock = NEXT_MESSAGE_ID.lock().unwrap();
+            let current = *lock;
+            *lock = current.wrapping_add(1);
+            current
+        };
 
         Self {
             id,

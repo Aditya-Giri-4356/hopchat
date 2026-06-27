@@ -111,6 +111,7 @@ pub async fn listen_for_messages(
     // DoS Mitigation: Map of IP to TokenBucket (Allows 20 packets/sec burst)
     let mut rate_limits: HashMap<IpAddr, TokenBucket> = HashMap::new();
     let mut ip_to_username: HashMap<IpAddr, String> = HashMap::new();
+    let mut pinned_identities: HashMap<String, String> = HashMap::new();
     let max_tokens = 20.0;
     let refill_rate = 5.0; // Tokens per second
     
@@ -183,6 +184,17 @@ pub async fn listen_for_messages(
                         let sender_signature = parts[4];
 
                         if sender_username != our_username {
+                            // Check if the identity is pinned, and if it matches
+                            if let Some(pinned_ed25519) = pinned_identities.get(&sender_username) {
+                                if pinned_ed25519 != sender_ed25519_hex {
+                                    eprintln!("CRITICAL SECURITY ALERT: Peer '{}' presented a different identity key! Possible MITM attack. Packet dropped.", sender_username);
+                                    continue; // Drop out prematurely, do not derive key
+                                }
+                            } else {
+                                // First time seeing this peer, pin their identity (TOFU)
+                                pinned_identities.insert(sender_username.clone(), sender_ed25519_hex.to_string());
+                            }
+
                             // Verify the identity signature to prevent spoofing
                             if LocalIdentity::verify_signature(
                                 sender_ed25519_hex,
@@ -239,31 +251,37 @@ pub async fn listen_for_messages(
                     let mut decrypted_msg = None;
                     let mut matched_username = None;
 
-                    let session_keys = {
+                    // Scope the lock tightly to avoid cloning the massive HashMap on every packet
+                    {
                         let keys_lock = peer_keys.lock().await;
-                        keys_lock.clone()
-                    };
+                        
+                        // 1. O(1) Fast Path: Try the IP-to-Username cache first
+                        if let Some(username) = ip_to_username.get(&ip) {
+                            if let Some(key) = keys_lock.get(username) {
+                                if let Some(msg) = ChatMessage::from_packet_string(packet_str, key) {
+                                    decrypted_msg = Some(msg);
+                                    matched_username = Some(username.clone());
+                                }
+                            }
+                        }
 
-                    if let Some(username) = ip_to_username.get(&ip) {
-                        if let Some(key) = session_keys.get(username) {
-                            if let Some(msg) = ChatMessage::from_packet_string(packet_str, key) {
-                                decrypted_msg = Some(msg);
-                                matched_username = Some(username.clone());
+                        // 2. O(N) Slow Path: Trial Decryption (with yield to prevent CPU lockup)
+                        if decrypted_msg.is_none() {
+                            for (peer_username, key) in keys_lock.iter() {
+                                if let Some(msg) = ChatMessage::from_packet_string(packet_str, key) {
+                                    decrypted_msg = Some(msg);
+                                    matched_username = Some(peer_username.clone());
+                                    break;
+                                }
+                                // Yield control back to Tokio to prevent a malicious UDP flood from starving the event loop
+                                tokio::task::yield_now().await; 
                             }
                         }
                     }
 
-                    // Fallback to O(N) trial decryption if IP cache misses
-                    if decrypted_msg.is_none() {
-                        for (peer_username, key) in &session_keys {
-                            if let Some(msg) = ChatMessage::from_packet_string(packet_str, key) {
-                                decrypted_msg = Some(msg);
-                                matched_username = Some(peer_username.clone());
-                                // Update cache for future O(1) lookups
-                                ip_to_username.insert(ip, peer_username.clone());
-                                break;
-                            }
-                        }
+                    // 3. Update the IP cache outside the lock if we found a match
+                    if let Some(ref username) = matched_username {
+                        ip_to_username.insert(ip, username.clone());
                     }
 
                     if let (Some(msg), Some(peer_username)) = (decrypted_msg, matched_username) {
