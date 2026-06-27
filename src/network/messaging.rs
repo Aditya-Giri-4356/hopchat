@@ -196,6 +196,19 @@ pub async fn listen_for_messages(
                                     keys_lock.insert(sender_username.clone(), derived_key);
                                     ip_to_username.insert(ip, sender_username.clone());
 
+                                    // Register/refresh peer in the registry so they appear in FRIENDS.
+                                    // This is critical for /connect on iSH where discovery broadcasts
+                                    // don't work — the key exchange is the only signal we get.
+                                    {
+                                        let mut reg = peer_registry.lock().await;
+                                        reg.insert(sender_username.clone(), Peer {
+                                            username: sender_username.clone(),
+                                            ip: src_addr.ip().to_string(),
+                                            port: src_addr.port(),
+                                            last_seen: tokio::time::Instant::now(),
+                                        });
+                                    }
+
                                     // Send our key back to complete the handshake if we didn't have theirs
                                     if !already_had_key {
                                         let pub_x25519 = local_keypair.public_key_hex();
@@ -259,6 +272,15 @@ pub async fn listen_for_messages(
                         // Send an ACK back to the sender
                         let ack_packet = format!("HOPCHAT_ACK|{}", msg_id);
                         let _ = socket.send_to(ack_packet.as_bytes(), &src_addr).await;
+
+                        // Refresh last_seen so /connect peers don't get evicted
+                        // by the 15-second cleanup task
+                        {
+                            let mut reg = peer_registry.lock().await;
+                            if let Some(peer) = reg.get_mut(&peer_username) {
+                                peer.last_seen = tokio::time::Instant::now();
+                            }
+                        }
 
                         // Check deduplication cache
                         let mut cache = dedup_cache.lock().await;
