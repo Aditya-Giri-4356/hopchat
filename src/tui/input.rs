@@ -26,6 +26,8 @@ pub enum InputAction {
     Quit,
     /// Toggle the network scanner overlay
     ToggleScanner,
+    /// A mouse click occurred at (x, y)
+    Click(u16, u16),
     /// No action (timeout or irrelevant event)
     None,
 }
@@ -36,27 +38,35 @@ pub enum InputAction {
 /// The timeout ensures the event loop can process other tasks
 /// (incoming messages, discovery, etc.) between input polls without blocking the thread.
 pub async fn next_input_event(stream: &mut EventStream, max_wait: Duration) -> InputAction {
-    if let Ok(Some(Ok(Event::Key(key)))) = timeout(max_wait, stream.next()).await {
-        // Only handle Press events (crossterm may fire Release too)
-        if key.kind != KeyEventKind::Press {
-            return InputAction::None;
-        }
-
-        return match key.code {
-            KeyCode::Char('c')
-                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
-                InputAction::Quit
+    if let Ok(Some(Ok(event))) = timeout(max_wait, stream.next()).await {
+        match event {
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    return InputAction::None;
+                }
+                return match key.code {
+                    KeyCode::Char('c')
+                        if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        InputAction::Quit
+                    }
+                    KeyCode::Esc => InputAction::Quit,
+                    KeyCode::Tab => InputAction::ToggleScanner,
+                    KeyCode::Enter => InputAction::Send,
+                    KeyCode::Backspace => InputAction::Backspace,
+                    KeyCode::Up => InputAction::SelectUp,
+                    KeyCode::Down => InputAction::SelectDown,
+                    KeyCode::Char(c) => InputAction::Character(c),
+                    _ => InputAction::None,
+                };
             }
-            KeyCode::Esc => InputAction::Quit,
-            KeyCode::Tab => InputAction::ToggleScanner,
-            KeyCode::Enter => InputAction::Send,
-            KeyCode::Backspace => InputAction::Backspace,
-            KeyCode::Up => InputAction::SelectUp,
-            KeyCode::Down => InputAction::SelectDown,
-            KeyCode::Char(c) => InputAction::Character(c),
-            _ => InputAction::None,
-        };
+            Event::Mouse(mouse_event) => {
+                if mouse_event.kind == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) {
+                    return InputAction::Click(mouse_event.column, mouse_event.row);
+                }
+            }
+            _ => {}
+        }
     }
     InputAction::None
 }

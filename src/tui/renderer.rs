@@ -26,8 +26,20 @@ pub fn render_ui(
 ) {
     render_header(frame, layout.header);
     render_friends(frame, layout.friends, peers, selected_peer);
-    render_network_map(frame, layout.network_map, username, peers);
-    render_network_status(frame, layout.network_status, peers);
+    
+    // Only render network map and status if they have space (Desktop layout)
+    if layout.network_map.width > 0 {
+        render_network_map(frame, layout.network_map, username, peers);
+    }
+    if layout.network_status.width > 0 {
+        render_network_status(frame, layout.network_status, peers);
+    }
+
+    // Render Quit button for Mobile layout
+    if let Some(quit_rect) = layout.quit_button {
+        render_quit_button(frame, quit_rect);
+    }
+
     render_chat(frame, layout.chat, username, messages, peers, selected_peer);
     render_input(frame, layout.input, input, cursor_pos);
 
@@ -254,6 +266,24 @@ fn render_input(frame: &mut Frame, area: Rect, input: &str, cursor_pos: usize) {
         area.x + 3 + cursor_pos as u16, // +3 for "> " prefix and border
         area.y + 1,
     );
+}
+
+/// Renders the mobile-specific Quit button
+fn render_quit_button(frame: &mut Frame, area: Rect) {
+    let text = ratatui::text::Text::from(vec![
+        ratatui::text::Line::from(vec![Span::styled(
+            "   [ QUIT ]   ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        )]),
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .style(Style::default().bg(Color::Black));
+        
+    let p = Paragraph::new(text).block(block).alignment(Alignment::Center);
+    frame.render_widget(p, area);
 }
 
 /// Renders the network scanner interactive popup overlay

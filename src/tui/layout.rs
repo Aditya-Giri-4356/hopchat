@@ -20,37 +20,69 @@ pub struct AppLayout {
     pub network_status: Rect,
     pub chat: Rect,
     pub input: Rect,
+    pub quit_button: Option<Rect>,
 }
 
-/// Computes the layout for the entire terminal area.
 pub fn compute_layout(area: Rect) -> AppLayout {
-    // Main vertical split: header, middle, status, chat, input
-    let main_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Min(8),    // Middle (friends + network map)
-            Constraint::Length(3),  // Network status
-            Constraint::Min(8),    // Chat window
-            Constraint::Length(3),  // Input prompt
-        ])
-        .split(area);
+    if area.width < 100 {
+        // --- Mobile Layout ---
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),  // Header
+                Constraint::Length(3),  // Quit Button row
+                Constraint::Percentage(30), // Friends
+                Constraint::Percentage(70), // Chat window
+                Constraint::Length(3),  // Input prompt
+            ])
+            .split(area);
 
-    // Middle horizontal split: friends (left) + network map (right)
-    let middle_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(35),
-            Constraint::Percentage(65),
-        ])
-        .split(main_chunks[1]);
+        let quit_row = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(70),
+                Constraint::Percentage(30), // Quit button width
+            ])
+            .split(main_chunks[1]);
 
-    AppLayout {
-        header: main_chunks[0],
-        friends: middle_chunks[0],
-        network_map: middle_chunks[1],
-        network_status: main_chunks[2],
-        chat: main_chunks[3],
-        input: main_chunks[4],
+        AppLayout {
+            header: main_chunks[0],
+            friends: main_chunks[2],
+            network_map: Rect::new(0, 0, 0, 0), // Hidden on mobile
+            network_status: Rect::new(0, 0, 0, 0), // Hidden on mobile
+            chat: main_chunks[3],
+            input: main_chunks[4],
+            quit_button: Some(quit_row[1]),
+        }
+    } else {
+        // --- Desktop Layout ---
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),  // Header
+                Constraint::Min(8),    // Middle (friends + network map)
+                Constraint::Length(3),  // Network status
+                Constraint::Min(8),    // Chat window
+                Constraint::Length(3),  // Input prompt
+            ])
+            .split(area);
+
+        let middle_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(35),
+                Constraint::Percentage(65),
+            ])
+            .split(main_chunks[1]);
+
+        AppLayout {
+            header: main_chunks[0],
+            friends: middle_chunks[0],
+            network_map: middle_chunks[1],
+            network_status: main_chunks[2],
+            chat: main_chunks[3],
+            input: main_chunks[4],
+            quit_button: None,
+        }
     }
 }

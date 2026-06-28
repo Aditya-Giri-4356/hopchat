@@ -26,7 +26,7 @@ use network::peer_registry::{Peer, PeerRegistry};
 use user::identity::LocalIdentity;
 
 use crossterm::{
-    event::EventStream,
+    event::{EventStream, EnableMouseCapture, DisableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -213,7 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Step 4: Set up the TUI ---
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -222,7 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Step 6: Cleanup ---
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
     if let Err(e) = result {
@@ -289,6 +289,16 @@ async fn run_event_loop(
 
         match action {
             input::InputAction::Quit => break,
+
+            input::InputAction::Click(x, y) => {
+                let current_layout = layout::compute_layout(terminal.size().unwrap_or_default());
+                if let Some(quit_rect) = current_layout.quit_button {
+                    if x >= quit_rect.x && x < quit_rect.x + quit_rect.width &&
+                       y >= quit_rect.y && y < quit_rect.y + quit_rect.height {
+                        break;
+                    }
+                }
+            }
 
             input::InputAction::ToggleScanner => {
                 state.scanner.is_visible = !state.scanner.is_visible;
