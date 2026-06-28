@@ -133,13 +133,19 @@ cd hopchat-v1
 cargo run --release
 ```
 
+### Interactive Subnet Scanner (Auto-Connect)
+
+If automatic UDP multicast discovery is failing on your network (common on restrictive routers, iOS, or enterprise Wi-Fi), you can press **`Tab`** at any time to open the **Network Subnet Scanner**. 
+
+This overlay actively pings all 254 IP addresses in your local subnet, bypasses multicast restrictions, and resolves the device hostnames in the background. Use your **Up and Down arrow keys** to select a discovered peer and press **Enter** to instantly connect!
+
 ### Commands
 
 Inside the chat buffer, you can execute special slash commands:
 
 - /help - Show the contextual help menu.
 - /peers - List all currently active peers, along with their resolved local IP addresses.
-- /connect <ip> - Manually fire a handshake to a specific IP Address. This bypasses UDP multicast drops and establishes a direct P2P link (Critical for iOS / iSH / restrictive routers).
+- /connect <ip> - Manually fire a handshake to a specific IP Address. (The **`Tab`** Subnet Scanner is highly recommended over this).
 - /quit - Safely exit the application. Alternatively, press CTRL-C or ESC.
 
 ---
