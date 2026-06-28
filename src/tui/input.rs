@@ -24,6 +24,8 @@ pub enum InputAction {
     SelectDown,
     /// Quit the application
     Quit,
+    /// Toggle the network scanner overlay
+    ToggleScanner,
     /// No action (timeout or irrelevant event)
     None,
 }
@@ -47,6 +49,7 @@ pub async fn next_input_event(stream: &mut EventStream, max_wait: Duration) -> I
                 InputAction::Quit
             }
             KeyCode::Esc => InputAction::Quit,
+            KeyCode::Tab => InputAction::ToggleScanner,
             KeyCode::Enter => InputAction::Send,
             KeyCode::Backspace => InputAction::Backspace,
             KeyCode::Up => InputAction::SelectUp,

@@ -43,6 +43,12 @@ use tokio::sync::Mutex;
 /// If unavailable, a dynamic port is assigned automatically.
 const PREFERRED_CHAT_PORT: u16 = 9878;
 
+pub struct ScannerState {
+    pub is_visible: bool,
+    pub selected_index: usize,
+    pub local_ip: String,
+}
+
 /// Shared application state accessible from multiple async tasks.
 pub struct AppState {
     /// The local user's username
@@ -69,6 +75,8 @@ pub struct AppState {
     pub chat_port: u16,
     /// Index of the currently selected peer in the friends list
     pub selected_peer: usize,
+    /// State for the subnet scanner popup overlay
+    pub scanner: ScannerState,
 }
 
 /// Prompts the user for their username via stdin (before TUI starts).
@@ -147,6 +155,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_pos: 0,
         chat_port,
         selected_peer: 0,
+        scanner: ScannerState {
+            is_visible: false,
+            selected_index: 0,
+            local_ip: local_ip.clone(),
+        },
     };
 
     // --- Step 3: Spawn background network tasks ---
@@ -266,6 +279,8 @@ async fn run_event_loop(
                 &active_messages,
                 &state.input_buffer,
                 state.cursor_pos,
+                state.scanner.is_visible,
+                state.scanner.selected_index,
             );
         })?;
 
@@ -275,33 +290,98 @@ async fn run_event_loop(
         match action {
             input::InputAction::Quit => break,
 
+            input::InputAction::ToggleScanner => {
+                state.scanner.is_visible = !state.scanner.is_visible;
+                if state.scanner.is_visible {
+                    state.scanner.selected_index = 0;
+                    
+                    let parts: Vec<&str> = state.scanner.local_ip.split('.').collect();
+                    if parts.len() == 4 {
+                        let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+                        let socket = state.outbound_socket.clone();
+                        
+                        let discovery_payload = format!(
+                            "HOPCHAT|{}|{}|{}",
+                            state.username, state.scanner.local_ip, state.chat_port
+                        );
+                        let pub_x25519 = state.keypair.public_key_hex();
+                        let pub_ed25519 = state.identity.public_key_hex();
+                        let sig = state.identity.sign_payload(pub_x25519.as_bytes());
+                        let key_payload = format!(
+                            "HOPCHAT_KEY|{}|{}|{}|{}",
+                            state.username, pub_x25519, pub_ed25519, sig
+                        );
+                        
+                        let chat_port = crate::PREFERRED_CHAT_PORT;
+                        let disc_port = 9878; // Fixed discovery port
+                        
+                        tokio::spawn(async move {
+                            for i in 1..=254 {
+                                let target_ip = format!("{}.{}", prefix, i);
+                                let target_disc = format!("{}:{}", target_ip, disc_port);
+                                let target_chat = format!("{}:{}", target_ip, chat_port);
+                                
+                                let _ = socket.send_to(discovery_payload.as_bytes(), &target_disc).await;
+                                let _ = socket.send_to(discovery_payload.as_bytes(), &target_chat).await;
+                                let _ = socket.send_to(key_payload.as_bytes(), &target_disc).await;
+                                let _ = socket.send_to(key_payload.as_bytes(), &target_chat).await;
+                            }
+                        });
+                    }
+                }
+            }
+
             input::InputAction::Character(c) => {
-                state.input_buffer.insert(state.cursor_pos, c);
-                state.cursor_pos += 1;
+                if !state.scanner.is_visible {
+                    state.input_buffer.insert(state.cursor_pos, c);
+                    state.cursor_pos += 1;
+                }
             }
 
             input::InputAction::Backspace => {
-                if state.cursor_pos > 0 {
+                if !state.scanner.is_visible && state.cursor_pos > 0 {
                     state.cursor_pos -= 1;
                     state.input_buffer.remove(state.cursor_pos);
                 }
             }
 
             input::InputAction::SelectUp => {
-                if state.selected_peer > 0 {
-                    state.selected_peer -= 1;
+                if state.scanner.is_visible {
+                    if state.scanner.selected_index > 0 {
+                        state.scanner.selected_index -= 1;
+                    }
+                } else {
+                    if state.selected_peer > 0 {
+                        state.selected_peer -= 1;
+                    }
                 }
             }
 
             input::InputAction::SelectDown => {
-                if !peers_snapshot.is_empty()
-                    && state.selected_peer < peers_snapshot.len() - 1
-                {
-                    state.selected_peer += 1;
+                if state.scanner.is_visible {
+                    if state.scanner.selected_index < peers_snapshot.len().saturating_sub(1) {
+                        state.scanner.selected_index += 1;
+                    }
+                } else {
+                    if !peers_snapshot.is_empty()
+                        && state.selected_peer < peers_snapshot.len() - 1
+                    {
+                        state.selected_peer += 1;
+                    }
                 }
             }
 
             input::InputAction::Send => {
+                if state.scanner.is_visible {
+                    if !peers_snapshot.is_empty() && state.scanner.selected_index < peers_snapshot.len() {
+                        let target_ip = peers_snapshot[state.scanner.selected_index].ip.clone();
+                        let cmd_input = format!("/connect {}", target_ip);
+                        cli::commands::handle_command(state, &cmd_input).await;
+                    }
+                    state.scanner.is_visible = false;
+                    continue;
+                }
+                
                 if !state.input_buffer.is_empty() {
                     let cmd_input = state.input_buffer.clone();
                     

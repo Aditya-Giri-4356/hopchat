@@ -21,6 +21,8 @@ pub fn render_ui(
     messages: &[ChatMessage],
     input: &str,
     cursor_pos: usize,
+    scanner_visible: bool,
+    scanner_index: usize,
 ) {
     render_header(frame, layout.header);
     render_friends(frame, layout.friends, peers, selected_peer);
@@ -28,6 +30,10 @@ pub fn render_ui(
     render_network_status(frame, layout.network_status, peers);
     render_chat(frame, layout.chat, username, messages, peers, selected_peer);
     render_input(frame, layout.input, input, cursor_pos);
+
+    if scanner_visible {
+        render_scanner_popup(frame, peers, scanner_index);
+    }
 }
 
 /// Renders the top header bar.
@@ -231,20 +237,75 @@ fn render_chat(
 
 /// Renders the message input prompt with cursor.
 fn render_input(frame: &mut Frame, area: Rect, input: &str, cursor_pos: usize) {
-    let input_text = format!(" >>> {}", input);
-    let input_widget = Paragraph::new(input_text)
-        .style(Style::default().fg(Color::White))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        );
+    let style = Style::default().fg(Color::White);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+        
+    let text = ratatui::text::Text::from(vec![
+        ratatui::text::Line::from(vec![Span::styled(format!("> {}", input), style)]),
+    ]);
+
+    let input_widget = Paragraph::new(text).block(block);
     frame.render_widget(input_widget, area);
 
-    // Position the cursor in the input box
-    // +5 accounts for the border (1) + " >>> " prefix (5)
+    // Render cursor
     frame.set_cursor(
-        area.x + 5 + cursor_pos as u16,
+        area.x + 3 + cursor_pos as u16, // +3 for "> " prefix and border
         area.y + 1,
     );
+}
+
+/// Renders the network scanner interactive popup overlay
+fn render_scanner_popup(frame: &mut Frame, peers: &[Peer], selected_index: usize) {
+    let area = frame.size();
+    
+    // Create a centered rect
+    let popup_width = 60;
+    let popup_height = 15;
+    
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width.min(area.width), popup_height.min(area.height));
+
+    use ratatui::widgets::{Clear, ListState};
+
+    frame.render_widget(Clear, popup_area); // Clear background
+
+    let title = " Network Subnet Scanner (Tab to close) ";
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .style(Style::default().bg(Color::Black));
+
+    let items: Vec<ListItem> = if peers.is_empty() {
+        vec![ListItem::new("  (Scanning... No peers found yet)").style(Style::default().fg(Color::DarkGray))]
+    } else {
+        peers.iter().enumerate().map(|(i, peer)| {
+            let hostname_str = if let Some(ref h) = peer.hostname {
+                format!(" ({})", h)
+            } else {
+                "".to_string()
+            };
+            
+            let display_str = format!(" {} - {}{}", peer.username, peer.ip, hostname_str);
+            let mut style = Style::default().fg(Color::White);
+            
+            if i == selected_index {
+                style = style.bg(Color::Blue).add_modifier(Modifier::BOLD);
+            }
+            
+            ListItem::new(display_str).style(style)
+        }).collect()
+    };
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_symbol(">> ");
+
+    let mut state = ListState::default();
+    state.select(Some(selected_index));
+    frame.render_stateful_widget(list, popup_area, &mut state);
 }

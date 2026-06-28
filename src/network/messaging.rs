@@ -165,14 +165,16 @@ pub async fn listen_for_messages(
                                     // Only update last_seen, DO NOT update IP/Port from unauthenticated broadcast
                                     existing_peer.last_seen = tokio::time::Instant::now();
                                 } else {
-                                    // New peer, add to registry temporarily
                                     let peer = Peer {
                                         username: peer_username.clone(),
-                                        ip: peer_ip,
+                                        ip: peer_ip.clone(),
                                         port: peer_port,
+                                        hostname: None,
                                         last_seen: tokio::time::Instant::now(),
                                     };
-                                    reg.insert(peer_username, peer);
+                                    reg.insert(peer_username.clone(), peer);
+                                    drop(reg);
+                                    crate::network::peer_registry::resolve_hostname(peer_registry.clone(), peer_username, peer_ip);
                                 }
                             }
                         }
@@ -229,12 +231,19 @@ pub async fn listen_for_messages(
                                     // don't work — the key exchange is the only signal we get.
                                     {
                                         let mut reg = peer_registry.lock().await;
+                                        let is_new = !reg.contains_key(&sender_username);
+                                        let ip = src_addr.ip().to_string();
                                         reg.insert(sender_username.clone(), Peer {
                                             username: sender_username.clone(),
-                                            ip: src_addr.ip().to_string(),
+                                            ip: ip.clone(),
                                             port: src_addr.port(),
+                                            hostname: None,
                                             last_seen: tokio::time::Instant::now(),
                                         });
+                                        drop(reg);
+                                        if is_new {
+                                            crate::network::peer_registry::resolve_hostname(peer_registry.clone(), sender_username.clone(), ip);
+                                        }
                                     }
 
                                     // Send our key back to complete the handshake if we didn't have theirs

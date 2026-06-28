@@ -109,15 +109,23 @@ pub async fn listen_for_peers(
                             continue;
                         }
 
+                        let mut registry_lock = registry.lock().await;
+                        let is_new = !registry_lock.contains_key(&packet_username);
+
                         let peer = Peer {
                             username: packet_username.clone(),
-                            ip: packet_ip,
+                            ip: packet_ip.clone(),
                             port: packet_port,
+                            hostname: None,
                             last_seen: Instant::now(),
                         };
 
-                        let mut registry_lock = registry.lock().await;
-                        registry_lock.insert(packet_username, peer);
+                        registry_lock.insert(packet_username.clone(), peer);
+                        drop(registry_lock);
+
+                        if is_new {
+                            crate::network::peer_registry::resolve_hostname(registry.clone(), packet_username, packet_ip);
+                        }
                     }
                 }
             }
