@@ -5,7 +5,7 @@
 // Processes keyboard events from crossterm and translates them into
 // actions on the application state.
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, EventStream};
+use crossterm::event::{Event, KeyCode, KeyEventKind, EventStream};
 use futures::StreamExt;
 use std::time::Duration;
 use tokio::time::timeout;

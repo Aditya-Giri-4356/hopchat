@@ -104,7 +104,7 @@ hopchat
 git clone https://github.com/Aditya-Giri-4356/hopchat.git
 cd hopchat
 cargo build --release
-cp target/release/hopchat /usr/local/bin/ # Optional: copy to path
+sudo cp target/release/hopchat /usr/local/bin/ # Optional: copy to path
 ```
 
 #### 4. Package Manager (Global Cargo Install)

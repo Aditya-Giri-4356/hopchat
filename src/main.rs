@@ -26,7 +26,7 @@ use network::peer_registry::{Peer, PeerRegistry};
 use user::identity::LocalIdentity;
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, EventStream},
+    event::EventStream,
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
