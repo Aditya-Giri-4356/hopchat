@@ -13,6 +13,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Contains all the computed layout rectangles for each UI panel.
+#[derive(Clone)]
 pub struct AppLayout {
     pub header: Rect,
     pub friends: Rect,
@@ -20,23 +21,29 @@ pub struct AppLayout {
     pub network_status: Rect,
     pub chat: Rect,
     pub input: Rect,
+    /// [UI-MOB-3] Left portion of the mobile quit row — used for compact status
+    pub mobile_status: Option<Rect>,
     pub quit_button: Option<Rect>,
 }
 
 pub fn compute_layout(area: Rect) -> AppLayout {
-    if area.width < 120 || area.height >= area.width {
+    // [UI-MOB-1] Mobile layout for terminals under 100 columns (iSH ~80, Termux ~85-90).
+    // Uses width as the sole discriminant. The previous `area.height >= area.width`
+    // condition incorrectly triggered on tall desktop terminals (common on 16:9 monitors).
+    if area.width < 100 {
         // --- Mobile Layout ---
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),  // Header
-                Constraint::Length(3),  // Quit Button row
+                Constraint::Length(3),  // Quit Button row + mobile status
                 Constraint::Percentage(30), // Friends
                 Constraint::Percentage(70), // Chat window
                 Constraint::Length(3),  // Input prompt
             ])
             .split(area);
 
+        // [UI-MOB-3] Split the quit row into status (left) and quit button (right)
         let quit_row = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -52,6 +59,7 @@ pub fn compute_layout(area: Rect) -> AppLayout {
             network_status: Rect::new(0, 0, 0, 0), // Hidden on mobile
             chat: main_chunks[3],
             input: main_chunks[4],
+            mobile_status: Some(quit_row[0]),
             quit_button: Some(quit_row[1]),
         }
     } else {
@@ -82,7 +90,17 @@ pub fn compute_layout(area: Rect) -> AppLayout {
             network_status: main_chunks[2],
             chat: main_chunks[3],
             input: main_chunks[4],
+            mobile_status: None,
             quit_button: None,
         }
     }
 }
+
+// CHANGES:
+// [UI-MOB-1] Reverted mobile threshold to `area.width < 100`. Removed the
+//            `area.height >= area.width` condition that was incorrectly triggering
+//            on tall desktop terminals.
+// [UI-MOB-3] Added `mobile_status: Option<Rect>` for the left portion of the quit
+//            row, used to render a compact status bar on mobile. Desktop sets it to None.
+// [UI-MOB-4] Derived Clone on AppLayout so the last computed layout can be cached
+//            on AppState for reliable click detection.

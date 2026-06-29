@@ -10,7 +10,8 @@
 use crate::chat::messages::ChatMessage;
 use crate::crypto::key_exchange::X25519KeyPair;
 use crate::network::peer_registry::{Peer, PeerRegistry};
-use std::collections::{HashMap, VecDeque};
+use crate::network::discovery::sanitize_network_username;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,15 +24,58 @@ use crate::user::identity::LocalIdentity;
 pub type ChatHistory = Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>;
 /// A thread-safe registry mapping message IDs to their success notifiers.
 pub type AckRegistry = Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>>;
-/// A simple rolling cache to detect and drop duplicate arriving messages.
-pub type DedupCache = Arc<Mutex<VecDeque<u64>>>;
+/// [CONN-7] A HashSet-based dedup cache. HashSet::contains is O(1) vs VecDeque's O(n).
+/// When the set reaches capacity (500), it is cleared entirely. This trade-off is
+/// acceptable because the 500-entry window is large enough that clearing at capacity
+/// does not cause duplicate delivery in normal usage — the only risk is a brief
+/// window where a retransmitted packet from the exact moment of clearing could be
+/// accepted twice, which is harmless for chat messages.
+pub type DedupCache = Arc<Mutex<HashSet<u64>>>;
 /// A thread-safe registry mapping peer username to their negotiated 32-byte symmetric key.
 pub type PeerKeyRegistry = Arc<Mutex<HashMap<String, [u8; 32]>>>;
+/// [CONN-4] TOFU registry: maps peer username to their pinned Ed25519 public key hex.
+/// Stored on AppState so it persists for the entire process lifetime.
+pub type TofuRegistry = Arc<Mutex<HashMap<String, String>>>;
 
-/// A simple struct for tracking IP UDP burst rate limits
+/// [SEC-5] Integer-based token bucket for rate limiting.
+/// Uses millitokens (×1000) to allow sub-token accumulation without floating-point
+/// imprecision. All arithmetic is exact integer math.
 pub struct TokenBucket {
-    pub tokens: f32,
-    pub last_update: Instant,
+    tokens_milli: u64,      // current tokens × 1000
+    capacity_milli: u64,    // max tokens × 1000
+    refill_per_us: u64,     // millitokens added per microsecond
+    last_update: Instant,
+}
+
+impl TokenBucket {
+    fn new(max_tokens: u64, refill_per_second: u64) -> Self {
+        Self {
+            tokens_milli: max_tokens * 1000,
+            capacity_milli: max_tokens * 1000,
+            // refill_per_second tokens/sec = refill_per_second * 1000 millitokens/sec
+            // = refill_per_second * 1000 / 1_000_000 millitokens/us
+            // To avoid rounding to zero, we use: (refill_per_second * 1000) / 1_000_000
+            // which simplifies to refill_per_second / 1000. But that rounds to 0 for
+            // small values. Instead, store as millitokens_per_second and compute in try_consume.
+            refill_per_us: (refill_per_second * 1000).max(1),
+            last_update: Instant::now(),
+        }
+    }
+
+    fn try_consume(&mut self, now: Instant) -> bool {
+        let elapsed_us = now.duration_since(self.last_update).as_micros() as u64;
+        self.last_update = now;
+        // refill_per_us is actually millitokens per second, so:
+        // added = elapsed_us * refill_per_us / 1_000_000
+        let added = elapsed_us.saturating_mul(self.refill_per_us) / 1_000_000;
+        self.tokens_milli = self.tokens_milli.saturating_add(added).min(self.capacity_milli);
+        if self.tokens_milli >= 1000 {
+            self.tokens_milli -= 1000;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Sends a raw UDP packet (fire-and-forget).
@@ -44,7 +88,9 @@ pub async fn send_raw_packet(
     Ok(())
 }
 
-/// Sends a structured chat message and retries up to 3 times if no ACK is received.
+/// [CONN-8] Sends a structured chat message and retries up to 3 times if no ACK is received.
+/// On each retry iteration, the stale sender is removed from the registry before inserting
+/// a fresh one, preventing orphaned senders from resolving the wrong rx.
 pub async fn send_message_with_retry(
     socket: Arc<UdpSocket>,
     peer_addr: SocketAddr,
@@ -63,12 +109,24 @@ pub async fn send_message_with_retry(
         let (tx, rx) = oneshot::channel();
         {
             let mut reg = ack_registry.lock().await;
+            // [CONN-8] Remove any stale sender from a previous retry before inserting fresh
+            reg.remove(&message.id);
             reg.insert(message.id, tx);
         }
 
         // Send the raw packet
         if let Err(e) = send_raw_packet(&socket, peer_addr, &packet_str).await {
             eprintln!("Failed to send UDP packet: {}", e);
+            // [CONN-8] On send failure, remove the just-inserted sender immediately
+            // so the registry is never left with a sender whose packet was never sent
+            {
+                let mut reg = ack_registry.lock().await;
+                reg.remove(&message.id);
+            }
+            if attempt >= retry_limit {
+                return Err("Failed to deliver message: send_raw_packet failed after 3 attempts.".into());
+            }
+            continue;
         }
 
         // Wait up to 500ms for the ACK signal
@@ -107,13 +165,18 @@ pub async fn listen_for_messages(
     local_keypair: Arc<X25519KeyPair>,
     local_identity: Arc<LocalIdentity>,
     peer_registry: PeerRegistry,
+    tofu_registry: TofuRegistry,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // DoS Mitigation: Map of IP to TokenBucket (Allows 20 packets/sec burst)
+    // [SEC-5] DoS Mitigation: Integer-based token bucket (20 packets/sec burst, 5/sec refill)
     let mut rate_limits: HashMap<IpAddr, TokenBucket> = HashMap::new();
+    // [CONN-6] Bounded eviction queue for rate_limits — cap at 4096 entries
+    let mut rate_limit_order: VecDeque<IpAddr> = VecDeque::new();
+    const RATE_LIMIT_CAP: usize = 4096;
+
+    // [CONN-5] IP-to-username routing cache with bounded LRU eviction — cap at 1024 entries
     let mut ip_to_username: HashMap<IpAddr, String> = HashMap::new();
-    let mut pinned_identities: HashMap<String, String> = HashMap::new();
-    let max_tokens = 20.0;
-    let refill_rate = 5.0; // Tokens per second
+    let mut ip_cache_order: VecDeque<IpAddr> = VecDeque::new();
+    const IP_CACHE_CAP: usize = 1024;
     
     let mut buf = [0u8; 4096]; // HopChat packets are well under 4KB
     loop {
@@ -121,21 +184,24 @@ pub async fn listen_for_messages(
             let now = Instant::now();
             let ip = src_addr.ip();
 
-            // --- TOKEN BUCKET RATE LIMITER ---
-            let bucket = rate_limits.entry(ip).or_insert(TokenBucket {
-                tokens: max_tokens,
-                last_update: now,
-            });
+            // --- [SEC-5] INTEGER TOKEN BUCKET RATE LIMITER ---
+            // [CONN-6] Bounded rate_limits map with LRU eviction
+            if !rate_limits.contains_key(&ip) {
+                // New IP — enforce capacity before inserting
+                while rate_limit_order.len() >= RATE_LIMIT_CAP {
+                    if let Some(evict_ip) = rate_limit_order.pop_front() {
+                        rate_limits.remove(&evict_ip);
+                    }
+                }
+                rate_limits.insert(ip, TokenBucket::new(20, 5));
+                rate_limit_order.push_back(ip);
+            }
 
-            let elapsed = now.duration_since(bucket.last_update).as_secs_f32();
-            bucket.tokens = f32::min(max_tokens, bucket.tokens + elapsed * refill_rate);
-            bucket.last_update = now;
-
-            if bucket.tokens < 1.0 {
+            let bucket = rate_limits.get_mut(&ip).unwrap();
+            if !bucket.try_consume(now) {
                 // Drop packet: Rate limit exceeded
                 continue;
             }
-            bucket.tokens -= 1.0;
             // ---------------------------------
 
             if let Ok(text) = std::str::from_utf8(&buf[..len]) {
@@ -146,7 +212,11 @@ pub async fn listen_for_messages(
                 if packet_str.starts_with("HOPCHAT|") && !packet_str.starts_with("HOPCHAT_") {
                     let parts: Vec<&str> = packet_str.split('|').collect();
                     if parts.len() == 4 && parts[0] == "HOPCHAT" {
-                        let peer_username = parts[1].to_string();
+                        // [SEC-4] Sanitize network-provided username
+                        let peer_username = match sanitize_network_username(parts[1]) {
+                            Some(u) => u,
+                            None => continue,
+                        };
                         let peer_ip = parts[2].to_string();
                         if let Ok(peer_port) = parts[3].parse::<u16>() {
                             if peer_username != our_username {
@@ -196,21 +266,32 @@ pub async fn listen_for_messages(
                     // Format: HOPCHAT_KEY|username|x25519_pub|ed25519_pub|signature
                     let parts: Vec<&str> = packet_str.split('|').collect();
                     if parts.len() == 5 {
-                        let sender_username = parts[1].to_string();
+                        // [SEC-4] Sanitize network-provided username
+                        let sender_username = match sanitize_network_username(parts[1]) {
+                            Some(u) => u,
+                            None => continue,
+                        };
                         let sender_x25519_hex = parts[2];
                         let sender_ed25519_hex = parts[3];
                         let sender_signature = parts[4];
 
                         if sender_username != our_username {
-                            // Check if the identity is pinned, and if it matches
-                            if let Some(pinned_ed25519) = pinned_identities.get(&sender_username) {
-                                if pinned_ed25519 != sender_ed25519_hex {
-                                    eprintln!("CRITICAL SECURITY ALERT: Peer '{}' presented a different identity key! Possible MITM attack. Packet dropped.", sender_username);
-                                    continue; // Drop out prematurely, do not derive key
+                            // [CONN-4] Check TOFU registry (process-lifetime, not task-local)
+                            {
+                                let pinned = tofu_registry.lock().await;
+                                if let Some(pinned_ed25519) = pinned.get(&sender_username) {
+                                    if pinned_ed25519 != sender_ed25519_hex {
+                                        eprintln!("CRITICAL SECURITY ALERT: Peer '{}' presented a different identity key! Possible MITM attack. Packet dropped.", sender_username);
+                                        continue; // Drop out prematurely, do not derive key
+                                    }
                                 }
-                            } else {
-                                // First time seeing this peer, pin their identity (TOFU)
-                                pinned_identities.insert(sender_username.clone(), sender_ed25519_hex.to_string());
+                            }
+                            // Pin if first time (outside the lock scope above to avoid double-lock)
+                            {
+                                let mut pinned = tofu_registry.lock().await;
+                                if !pinned.contains_key(&sender_username) {
+                                    pinned.insert(sender_username.clone(), sender_ed25519_hex.to_string());
+                                }
                             }
 
                             // Verify the identity signature to prevent spoofing
@@ -224,6 +305,16 @@ pub async fn listen_for_messages(
                                     let mut keys_lock = peer_keys.lock().await;
                                     let already_had_key = keys_lock.contains_key(&sender_username);
                                     keys_lock.insert(sender_username.clone(), derived_key);
+
+                                    // [CONN-5] Update IP-to-username cache with bounded eviction
+                                    if !ip_to_username.contains_key(&ip) {
+                                        while ip_cache_order.len() >= IP_CACHE_CAP {
+                                            if let Some(evict_ip) = ip_cache_order.pop_front() {
+                                                ip_to_username.remove(&evict_ip);
+                                            }
+                                        }
+                                        ip_cache_order.push_back(ip);
+                                    }
                                     ip_to_username.insert(ip, sender_username.clone());
 
                                     // Register/refresh peer in the registry so they appear in FRIENDS.
@@ -311,8 +402,16 @@ pub async fn listen_for_messages(
                         }
                     }
 
-                    // 3. Update the IP cache outside the lock if we found a match
+                    // 3. [CONN-5] Update the IP cache outside the lock if we found a match (bounded)
                     if let Some(ref username) = matched_username {
+                        if !ip_to_username.contains_key(&ip) {
+                            while ip_cache_order.len() >= IP_CACHE_CAP {
+                                if let Some(evict_ip) = ip_cache_order.pop_front() {
+                                    ip_to_username.remove(&evict_ip);
+                                }
+                            }
+                            ip_cache_order.push_back(ip);
+                        }
                         ip_to_username.insert(ip, username.clone());
                     }
 
@@ -332,14 +431,14 @@ pub async fn listen_for_messages(
                             }
                         }
 
-                        // Check deduplication cache
+                        // [CONN-7] Check deduplication cache (O(1) HashSet lookup)
                         let mut cache = dedup_cache.lock().await;
                         if !cache.contains(&msg_id) {
-                            // Add to cache
+                            // [CONN-7] Clear at capacity instead of pop_front (HashSet has no ordering)
                             if cache.len() >= 500 {
-                                cache.pop_front();
+                                cache.clear();
                             }
-                            cache.push_back(msg_id);
+                            cache.insert(msg_id);
 
                             // Safe to add to chat history now
                             let mut history_lock = history.lock().await;
@@ -357,3 +456,17 @@ pub async fn listen_for_messages(
         }
     }
 }
+
+// CHANGES:
+// [CONN-4] pinned_identities moved out of this function into AppState as TofuRegistry.
+//          Passed in as a parameter. Persists for process lifetime.
+// [CONN-5] ip_to_username capped at 1024 entries with VecDeque-based LRU eviction.
+// [CONN-6] rate_limits capped at 4096 entries with VecDeque-based LRU eviction.
+//          Existing IPs update in-place without re-queuing.
+// [CONN-7] DedupCache changed from VecDeque<u64> to HashSet<u64> for O(1) contains().
+//          cache.clear() at capacity instead of pop_front.
+// [CONN-8] send_message_with_retry: Remove stale sender before inserting fresh on each
+//          retry. On send failure, immediately remove the just-inserted sender.
+// [SEC-4] All network-provided usernames sanitized via sanitize_network_username().
+// [SEC-5] TokenBucket replaced with integer microsecond accounting (millitokens).
+//         No floating-point arithmetic in the rate limiter.

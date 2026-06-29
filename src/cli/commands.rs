@@ -3,8 +3,7 @@
 // =============================================================================
 //
 // Handles slash commands entered in the chat input.
-// Returns `true` if the input was handled as a command, effectively
-// swallowing the input so it isn't sent as a regular chat message.
+// Returns a CommandResult indicating how the main loop should proceed.
 
 use crate::AppState;
 use crate::chat::messages::ChatMessage;
@@ -86,11 +85,11 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
             }
         }
         "/quit" => {
-            // Handled exclusively in main loop now.
-            // When intercepting here, we don't do anything because
-            // it's cleaner to let the input enum `InputAction::Quit` trigger it.
-            // But we can throw a log just in case this gets trapped.
-            push_system_msg("Type Ctrl-C or ESC to quit.");
+            // [UI-MOB-5] Set the shared quit flag so the main loop exits cleanly.
+            // This is critical on mobile (iSH) where ESC and Ctrl-C may not be
+            // available on software keyboards.
+            state.quit_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+            return CommandResult::Handled;
         }
         "/connect" => {
             if parts.len() < 2 {
@@ -121,11 +120,21 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
                         state.username, pub_x25519, pub_ed25519, sig
                     );
 
-                    // Target addresses: both discovery port AND chat port
+                    // [CONN-1] Determine the target chat port:
+                    // If the peer is already in the registry, use their advertised port.
+                    // Otherwise, fall back to PREFERRED_CHAT_PORT (cold connect where
+                    // we only have an IP and no prior knowledge of their port).
+                    let peer_chat_port = {
+                        let peers_lock = state.peers.lock().await;
+                        peers_lock.values()
+                            .find(|p| p.ip == target_ip)
+                            .map(|p| p.port)
+                            .unwrap_or(crate::PREFERRED_CHAT_PORT)
+                    };
+
                     let discovery_port = crate::network::discovery::DISCOVERY_PORT;
-                    let chat_port = crate::PREFERRED_CHAT_PORT;
                     let target_discovery = format!("{}:{}", target_ip, discovery_port);
-                    let target_chat = format!("{}:{}", target_ip, chat_port);
+                    let target_chat = format!("{}:{}", target_ip, peer_chat_port);
 
                     let socket = state.outbound_socket.clone();
                     let disc_payload = discovery_payload.clone();
@@ -164,3 +173,10 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
 
     CommandResult::Handled
 }
+
+// CHANGES:
+// [CONN-1] /connect now looks up the peer's actual registered port from the peer
+//          registry before sending. Falls back to PREFERRED_CHAT_PORT only for cold
+//          connects where the peer is not yet in the registry.
+// [UI-MOB-5] /quit now sets state.quit_requested AtomicBool to true, enabling
+//            reliable exit on mobile terminals where ESC/Ctrl-C are unavailable.

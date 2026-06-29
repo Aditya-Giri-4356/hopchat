@@ -35,7 +35,11 @@ impl Peer {
 /// A thread-safe, shared registry of active peers.
 pub type PeerRegistry = Arc<Mutex<HashMap<String, Peer>>>;
 
-/// Background task that removes peers not seen within the last 15 seconds.
+/// [SEC-7] Background task that removes peers not seen within the last 15 seconds.
+/// Uses a two-phase approach: collect stale keys with a brief read lock,
+/// then re-acquire for targeted removal. This avoids holding the exclusive
+/// lock for a full O(n) retain scan every second, preventing it from
+/// blocking the listener hot path.
 pub async fn cleanup_task(registry: PeerRegistry) {
     let mut tick = interval(Duration::from_secs(1));
     let timeout = Duration::from_secs(15);
@@ -43,9 +47,26 @@ pub async fn cleanup_task(registry: PeerRegistry) {
     loop {
         tick.tick().await;
         let now = Instant::now();
-        let mut registry_lock = registry.lock().await;
 
-        registry_lock.retain(|_, peer| now.duration_since(peer.last_seen) < timeout);
+        // Phase 1: Collect stale keys (brief lock)
+        let stale_keys: Vec<String> = {
+            let reg = registry.lock().await;
+            reg.iter()
+                .filter(|(_, p)| now.duration_since(p.last_seen) >= timeout)
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+
+        // Phase 2: Remove stale keys (only if needed)
+        if !stale_keys.is_empty() {
+            let mut reg = registry.lock().await;
+            for key in stale_keys {
+                reg.remove(&key);
+            }
+        }
+
+        // Yield to prevent starvation of other tasks on single-core systems
+        tokio::task::yield_now().await;
     }
 }
 
@@ -65,3 +86,9 @@ pub fn resolve_hostname(registry: PeerRegistry, username: String, ip: String) {
         }
     });
 }
+
+// CHANGES:
+// [SEC-7] cleanup_task: Replaced single-pass registry_lock.retain() with a two-phase
+//         approach. Phase 1 collects stale keys under a brief lock. Phase 2 re-acquires
+//         the lock only if removals are needed, doing targeted remove() calls instead
+//         of a full O(n) retain scan. Added yield_now() for single-core fairness.

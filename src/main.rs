@@ -20,7 +20,7 @@ mod user;
 use chat::messages::ChatMessage;
 use crypto::key_exchange::X25519KeyPair;
 use network::{discovery, messaging, peer_registry};
-use network::messaging::{AckRegistry, ChatHistory, DedupCache, PeerKeyRegistry};
+use network::messaging::{AckRegistry, ChatHistory, DedupCache, PeerKeyRegistry, TofuRegistry};
 use tui::{input, layout, renderer};
 use network::peer_registry::{Peer, PeerRegistry};
 use user::identity::LocalIdentity;
@@ -32,9 +32,10 @@ use crossterm::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -67,7 +68,7 @@ pub struct AppState {
     pub identity: Arc<LocalIdentity>,
     /// Current text in the input buffer
     pub input_buffer: String,
-    /// Cursor position within the input buffer
+    /// Cursor position within the input buffer (char index, not byte index)
     pub cursor_pos: usize,
     /// Shared UDP socket for ALL messaging (send + receive on same port)
     pub outbound_socket: Arc<UdpSocket>,
@@ -77,6 +78,10 @@ pub struct AppState {
     pub selected_peer: usize,
     /// State for the subnet scanner popup overlay
     pub scanner: ScannerState,
+    /// [UI-MOB-5] Shared quit flag — set by /quit command, checked at loop top
+    pub quit_requested: Arc<AtomicBool>,
+    /// [UI-MOB-4] Cached quit button rect from last draw for reliable click detection
+    pub last_quit_button_rect: Option<ratatui::layout::Rect>,
 }
 
 /// Prompts the user for their username via stdin (before TUI starts).
@@ -131,8 +136,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peers: PeerRegistry = Arc::new(Mutex::new(HashMap::new()));
     let chat_history: ChatHistory = Arc::new(Mutex::new(HashMap::new()));
     let ack_registry: AckRegistry = Arc::new(Mutex::new(HashMap::new()));
-    let dedup_cache: DedupCache = Arc::new(Mutex::new(VecDeque::new()));
+    // [CONN-7] DedupCache is now HashSet<u64> for O(1) contains()
+    let dedup_cache: DedupCache = Arc::new(Mutex::new(HashSet::new()));
     let peer_keys: PeerKeyRegistry = Arc::new(Mutex::new(HashMap::new()));
+    // [CONN-4] TOFU registry lives on AppState, persists for process lifetime
+    let tofu_registry: TofuRegistry = Arc::new(Mutex::new(HashMap::new()));
 
     // Create a SINGLE shared socket for all messaging (send + receive).
     // Try the preferred port first; fall back to a dynamic port if taken.
@@ -160,6 +168,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             selected_index: 0,
             local_ip: local_ip.clone(),
         },
+        quit_requested: Arc::new(AtomicBool::new(false)),
+        last_quit_button_rect: None,
     };
 
     // --- Step 3: Spawn background network tasks ---
@@ -187,6 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // UDP server: receive structured encrypted incoming messages and keys
     // Uses the SAME shared_socket for both receiving and sending responses.
+    // [CONN-4] Pass tofu_registry into listen_for_messages
     let listen_history = chat_history.clone();
     let listen_acks = ack_registry.clone();
     let listen_dedup = dedup_cache.clone();
@@ -196,9 +207,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_username = username.clone();
     let listen_socket = shared_socket.clone();
     let listen_peers = peers.clone();
+    let listen_tofu = tofu_registry.clone();
     tokio::spawn(async move {
         if let Err(e) = messaging::listen_for_messages(
-            listen_socket, listen_username, listen_history, listen_acks, listen_dedup, listen_peer_keys, listen_keypair, listen_identity, listen_peers
+            listen_socket, listen_username, listen_history, listen_acks, listen_dedup, listen_peer_keys, listen_keypair, listen_identity, listen_peers, listen_tofu
         ).await {
             eprintln!("Messaging listen error: {}", e);
         }
@@ -240,6 +252,10 @@ async fn run_event_loop(
     let mut event_stream = EventStream::new();
     
     loop {
+        // [UI-MOB-5] Check the shared quit flag at the top of every iteration
+        if state.quit_requested.load(Ordering::Relaxed) {
+            break;
+        }
 
         // --- Get current peer list snapshot ---
         let peers_snapshot: Vec<Peer> = {
@@ -268,6 +284,7 @@ async fn run_event_loop(
         };
 
         // --- Render the UI ---
+        // [UI-MOB-4] Cache the quit_button rect from the last successful draw
         terminal.draw(|frame| {
             let app_layout = layout::compute_layout(frame.size());
             renderer::render_ui(
@@ -282,6 +299,8 @@ async fn run_event_loop(
                 state.scanner.is_visible,
                 state.scanner.selected_index,
             );
+            // Cache the quit button rect for click detection
+            state.last_quit_button_rect = app_layout.quit_button;
         })?;
 
         // --- Asynchronously poll for keyboard input (50ms timeout) ---
@@ -291,8 +310,9 @@ async fn run_event_loop(
             input::InputAction::Quit => break,
 
             input::InputAction::Click(x, y) => {
-                let current_layout = layout::compute_layout(terminal.size().unwrap_or_default());
-                if let Some(quit_rect) = current_layout.quit_button {
+                // [UI-MOB-4] Use cached quit_button rect from last draw instead of
+                // recomputing layout from terminal.size().unwrap_or_default()
+                if let Some(quit_rect) = state.last_quit_button_rect {
                     if x >= quit_rect.x && x < quit_rect.x + quit_rect.width &&
                        y >= quit_rect.y && y < quit_rect.y + quit_rect.height {
                         break;
@@ -305,6 +325,10 @@ async fn run_event_loop(
                 if state.scanner.is_visible {
                     state.scanner.selected_index = 0;
                     
+                    // [CONN-2] Scanner's job is only peer DISCOVERY — send only the
+                    // HOPCHAT|username|ip|port discovery payload to all subnet IPs.
+                    // Key exchange happens automatically after a peer responds and
+                    // appears in the registry. Do NOT send HOPCHAT_KEY during scan.
                     let parts: Vec<&str> = state.scanner.local_ip.split('.').collect();
                     if parts.len() == 4 {
                         let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
@@ -314,16 +338,9 @@ async fn run_event_loop(
                             "HOPCHAT|{}|{}|{}",
                             state.username, state.scanner.local_ip, state.chat_port
                         );
-                        let pub_x25519 = state.keypair.public_key_hex();
-                        let pub_ed25519 = state.identity.public_key_hex();
-                        let sig = state.identity.sign_payload(pub_x25519.as_bytes());
-                        let key_payload = format!(
-                            "HOPCHAT_KEY|{}|{}|{}|{}",
-                            state.username, pub_x25519, pub_ed25519, sig
-                        );
                         
+                        let disc_port = discovery::DISCOVERY_PORT;
                         let chat_port = crate::PREFERRED_CHAT_PORT;
-                        let disc_port = 9878; // Fixed discovery port
                         
                         tokio::spawn(async move {
                             for i in 1..=254 {
@@ -331,10 +348,9 @@ async fn run_event_loop(
                                 let target_disc = format!("{}:{}", target_ip, disc_port);
                                 let target_chat = format!("{}:{}", target_ip, chat_port);
                                 
+                                // Discovery only — no key exchange during scan
                                 let _ = socket.send_to(discovery_payload.as_bytes(), &target_disc).await;
                                 let _ = socket.send_to(discovery_payload.as_bytes(), &target_chat).await;
-                                let _ = socket.send_to(key_payload.as_bytes(), &target_disc).await;
-                                let _ = socket.send_to(key_payload.as_bytes(), &target_chat).await;
                             }
                         });
                     }
@@ -343,15 +359,29 @@ async fn run_event_loop(
 
             input::InputAction::Character(c) => {
                 if !state.scanner.is_visible {
-                    state.input_buffer.insert(state.cursor_pos, c);
+                    // [UI-DESK-4] Translate cursor_pos (char index) to byte offset
+                    // before String::insert to prevent panics on multibyte UTF-8 chars
+                    let byte_pos = state.input_buffer
+                        .char_indices()
+                        .nth(state.cursor_pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or_else(|| state.input_buffer.len());
+                    state.input_buffer.insert(byte_pos, c);
                     state.cursor_pos += 1;
                 }
             }
 
             input::InputAction::Backspace => {
+                // [UI-DESK-4] Translate cursor_pos (char index) to byte offset
+                // before String::remove to prevent panics on multibyte UTF-8 chars
                 if !state.scanner.is_visible && state.cursor_pos > 0 {
                     state.cursor_pos -= 1;
-                    state.input_buffer.remove(state.cursor_pos);
+                    let byte_pos = state.input_buffer
+                        .char_indices()
+                        .nth(state.cursor_pos)
+                        .map(|(i, _)| i)
+                        .unwrap_or_else(|| state.input_buffer.len());
+                    state.input_buffer.remove(byte_pos);
                 }
             }
 
@@ -410,6 +440,7 @@ async fn run_event_loop(
                             state.scanner.is_visible = true;
                             state.scanner.selected_index = 0;
                             
+                            // [CONN-2] Scanner sends discovery only — no key exchange
                             let parts: Vec<&str> = state.scanner.local_ip.split('.').collect();
                             if parts.len() == 4 {
                                 let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
@@ -419,16 +450,9 @@ async fn run_event_loop(
                                     "HOPCHAT|{}|{}|{}",
                                     state.username, state.scanner.local_ip, state.chat_port
                                 );
-                                let pub_x25519 = state.keypair.public_key_hex();
-                                let pub_ed25519 = state.identity.public_key_hex();
-                                let sig = state.identity.sign_payload(pub_x25519.as_bytes());
-                                let key_payload = format!(
-                                    "HOPCHAT_KEY|{}|{}|{}|{}",
-                                    state.username, pub_x25519, pub_ed25519, sig
-                                );
                                 
+                                let disc_port = discovery::DISCOVERY_PORT;
                                 let chat_port = crate::PREFERRED_CHAT_PORT;
-                                let disc_port = 9878; // Fixed discovery port
                                 
                                 tokio::spawn(async move {
                                     for i in 1..=254 {
@@ -436,10 +460,9 @@ async fn run_event_loop(
                                         let target_disc = format!("{}:{}", target_ip, disc_port);
                                         let target_chat = format!("{}:{}", target_ip, chat_port);
                                         
+                                        // Discovery only — no key exchange during scan
                                         let _ = socket.send_to(discovery_payload.as_bytes(), &target_disc).await;
                                         let _ = socket.send_to(discovery_payload.as_bytes(), &target_chat).await;
-                                        let _ = socket.send_to(key_payload.as_bytes(), &target_disc).await;
-                                        let _ = socket.send_to(key_payload.as_bytes(), &target_chat).await;
                                     }
                                 });
                             }
@@ -545,3 +568,19 @@ async fn run_event_loop(
 
     Ok(())
 }
+
+// CHANGES:
+// [CONN-1] Scanner and TriggerScan now use discovery::DISCOVERY_PORT and
+//          PREFERRED_CHAT_PORT correctly (scanner is discovery-only so this is fine).
+// [CONN-2] ToggleScanner and TriggerScan: Removed HOPCHAT_KEY from scanner broadcasts.
+//          Scanner now sends ONLY discovery payloads. Key exchange is deferred to
+//          /connect after a user selects a peer.
+// [CONN-4] Created tofu_registry (TofuRegistry) on AppState and passed it into
+//          listen_for_messages as a parameter.
+// [CONN-7] DedupCache initialized as HashSet::new() instead of VecDeque::new().
+// [UI-DESK-4] Character and Backspace arms: cursor_pos translated to byte offset
+//             via char_indices().nth() before String::insert/remove.
+// [UI-MOB-4] Cached last_quit_button_rect from draw closure. Click handler uses
+//            cached value instead of recomputing from terminal.size().unwrap_or_default().
+// [UI-MOB-5] Added quit_requested: Arc<AtomicBool> to AppState. Checked at loop top.
+//            /quit command sets it, enabling reliable exit on mobile.

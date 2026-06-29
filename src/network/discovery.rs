@@ -16,6 +16,7 @@ use tokio::time::{interval, Duration, Instant};
 pub const DISCOVERY_PORT: u16 = 9877;
 
 /// Creates a UdpSocket configured for broadcast and port reuse.
+/// [SEC-6] Uses proper error propagation instead of unwrap() on SocketAddr parse.
 fn create_reuse_socket() -> Result<UdpSocket, std::io::Error> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     
@@ -28,7 +29,10 @@ fn create_reuse_socket() -> Result<UdpSocket, std::io::Error> {
     socket.set_broadcast(true)?;
     
     // Bind to all interfaces on the discovery port
-    let addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT).parse().unwrap();
+    // [SEC-6] Proper error propagation instead of .unwrap()
+    let addr: SocketAddr = format!("0.0.0.0:{}", DISCOVERY_PORT)
+        .parse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     socket.bind(&addr.into())?;
     
     // Join the multicast group for LAN environments where broadcast is disabled
@@ -98,7 +102,11 @@ pub async fn listen_for_peers(
 
                 // Validate packet structure: HOPCHAT|username|ip|port
                 if parts.len() == 4 && parts[0] == "HOPCHAT" {
-                    let packet_username = parts[1].to_string();
+                    // [SEC-4] Sanitize network-provided username before any use
+                    let packet_username = match sanitize_network_username(parts[1]) {
+                        Some(u) => u,
+                        None => continue, // Drop packet with invalid username
+                    };
                     let packet_ip = parts[2].to_string();
                     
                     if let Ok(packet_port) = parts[3].parse::<u16>() {
@@ -112,19 +120,25 @@ pub async fn listen_for_peers(
                         let mut registry_lock = registry.lock().await;
                         let is_new = !registry_lock.contains_key(&packet_username);
 
-                        let peer = Peer {
-                            username: packet_username.clone(),
-                            ip: packet_ip.clone(),
-                            port: packet_port,
-                            hostname: None,
-                            last_seen: Instant::now(),
-                        };
-
-                        registry_lock.insert(packet_username.clone(), peer);
-                        drop(registry_lock);
-
+                        // [CONN-3] IP/port updates for existing peers must only occur via
+                        // authenticated HOPCHAT_KEY packets (handled in messaging.rs).
+                        // Do not update routing from unauthenticated UDP discovery.
                         if is_new {
+                            let peer = Peer {
+                                username: packet_username.clone(),
+                                ip: packet_ip.clone(),
+                                port: packet_port,
+                                hostname: None,
+                                last_seen: Instant::now(),
+                            };
+                            registry_lock.insert(packet_username.clone(), peer);
+                            drop(registry_lock);
                             crate::network::peer_registry::resolve_hostname(registry.clone(), packet_username, packet_ip);
+                        } else {
+                            // Known peer: only refresh last_seen timestamp
+                            if let Some(existing) = registry_lock.get_mut(&packet_username) {
+                                existing.last_seen = Instant::now();
+                            }
                         }
                     }
                 }
@@ -132,3 +146,27 @@ pub async fn listen_for_peers(
         }
     }
 }
+
+/// [SEC-4] Sanitizes a network-provided username by stripping non-alphanumeric
+/// characters (except underscore) and capping length at 32.
+/// Returns None if the sanitized result is empty.
+pub fn sanitize_network_username(raw: &str) -> Option<String> {
+    let sanitized: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(32)
+        .collect();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+// CHANGES:
+// [CONN-3] listen_for_peers: For known peers (!is_new), only update last_seen —
+//          never update ip or port from unauthenticated UDP discovery packets.
+// [SEC-4] Added sanitize_network_username() helper. Applied to all network-provided
+//         usernames in listen_for_peers before any HashMap insertion.
+// [SEC-6] create_reuse_socket: Replaced .parse().unwrap() with .parse().map_err()
+//         for proper error propagation instead of panic on misconfiguration.
