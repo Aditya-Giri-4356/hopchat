@@ -396,10 +396,56 @@ async fn run_event_loop(
                     let cmd_input = state.input_buffer.clone();
                     
                     // 1. Intercept CLI Commands (e.g., /connect, /help)
-                    if cli::commands::handle_command(state, &cmd_input).await {
-                        state.input_buffer.clear();
-                        state.cursor_pos = 0;
-                        continue;
+                    match cli::commands::handle_command(state, &cmd_input).await {
+                        cli::commands::CommandResult::Handled => {
+                            state.input_buffer.clear();
+                            state.cursor_pos = 0;
+                            continue;
+                        }
+                        cli::commands::CommandResult::TriggerScan => {
+                            state.input_buffer.clear();
+                            state.cursor_pos = 0;
+                            
+                            // Trigger the scanner overlay manually
+                            state.scanner.is_visible = true;
+                            state.scanner.selected_index = 0;
+                            
+                            let parts: Vec<&str> = state.scanner.local_ip.split('.').collect();
+                            if parts.len() == 4 {
+                                let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+                                let socket = state.outbound_socket.clone();
+                                
+                                let discovery_payload = format!(
+                                    "HOPCHAT|{}|{}|{}",
+                                    state.username, state.scanner.local_ip, state.chat_port
+                                );
+                                let pub_x25519 = state.keypair.public_key_hex();
+                                let pub_ed25519 = state.identity.public_key_hex();
+                                let sig = state.identity.sign_payload(pub_x25519.as_bytes());
+                                let key_payload = format!(
+                                    "HOPCHAT_KEY|{}|{}|{}|{}",
+                                    state.username, pub_x25519, pub_ed25519, sig
+                                );
+                                
+                                let chat_port = crate::PREFERRED_CHAT_PORT;
+                                let disc_port = 9878; // Fixed discovery port
+                                
+                                tokio::spawn(async move {
+                                    for i in 1..=254 {
+                                        let target_ip = format!("{}.{}", prefix, i);
+                                        let target_disc = format!("{}:{}", target_ip, disc_port);
+                                        let target_chat = format!("{}:{}", target_ip, chat_port);
+                                        
+                                        let _ = socket.send_to(discovery_payload.as_bytes(), &target_disc).await;
+                                        let _ = socket.send_to(discovery_payload.as_bytes(), &target_chat).await;
+                                        let _ = socket.send_to(key_payload.as_bytes(), &target_disc).await;
+                                        let _ = socket.send_to(key_payload.as_bytes(), &target_chat).await;
+                                    }
+                                });
+                            }
+                            continue;
+                        }
+                        cli::commands::CommandResult::Ignored => {}
                     }
 
                     // 2. Chat Message Flow

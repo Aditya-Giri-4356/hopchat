@@ -24,7 +24,7 @@ pub struct AppLayout {
 }
 
 pub fn compute_layout(area: Rect) -> AppLayout {
-    if area.width < 100 {
+    if area.width < 120 || area.height >= area.width {
         // --- Mobile Layout ---
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)

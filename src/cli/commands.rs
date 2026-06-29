@@ -9,12 +9,22 @@
 use crate::AppState;
 use crate::chat::messages::ChatMessage;
 
+/// Represents the result of parsing a CLI command
+pub enum CommandResult {
+    /// Input was not a command or should be ignored
+    Ignored,
+    /// Command was handled successfully
+    Handled,
+    /// Command triggered the network scanner
+    TriggerScan,
+}
+
 /// Parses and executes an input string if it starts with a `/`.
-/// Returns `true` if it was a command, `false` otherwise.
-pub async fn handle_command(state: &mut AppState, input: &str) -> bool {
+/// Returns `CommandResult` indicating how the main loop should proceed.
+pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult {
     let cmd = input.trim();
     if !cmd.starts_with('/') {
-        return false;
+        return CommandResult::Ignored;
     }
 
     // Isolate the current selected peer to show system messages contextually
@@ -54,10 +64,14 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> bool {
             push_system_msg(
                 "Commands:\n\
                 /help         - Show this menu\n\
+                /scan         - Open the Interactive Subnet Scanner\n\
                 /connect <ip> - Manually connect to an IP (Bypasses discovery)\n\
                 /peers        - List all discovered peers and their IPs\n\
                 /quit         - Exit HopChat"
             );
+        }
+        "/scan" => {
+            return CommandResult::TriggerScan;
         }
         "/peers" => {
             let peers_lock = state.peers.lock().await;
@@ -148,5 +162,5 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> bool {
         }
     }
 
-    true
+    CommandResult::Handled
 }

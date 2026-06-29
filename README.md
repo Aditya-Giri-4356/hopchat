@@ -133,11 +133,22 @@ cd hopchat-v1
 cargo run --release
 ```
 
-### Interactive Subnet Scanner (Auto-Connect)
+### Interactive Subnet Scanner
 
-If automatic UDP multicast discovery is failing on your network (common on restrictive routers, iOS, or enterprise Wi-Fi), you can press **`Tab`** at any time to open the **Network Subnet Scanner**. 
+Want to see who is online before connecting? HopChat comes with a built-in subnet scanner overlay.
 
-This overlay actively pings all 254 IP addresses in your local subnet, bypasses multicast restrictions, and resolves the device hostnames in the background. Use your **Up and Down arrow keys** to select a discovered peer and press **Enter** to instantly connect!
+**How to use:**
+- **Desktop:** Press the **`Tab`** key while inside HopChat.
+- **Mobile (iSH / Termux):** Since virtual keyboards often don't emit the Tab keycode, simply type the **`/scan`** command in the chat box and press Enter.
+
+This will instantly pop open an interactive overlay. HopChat will automatically discover your local Wi-Fi subnet (e.g. `192.168.1.X`) and asynchronously blast UDP discovery packets to all 254 possible addresses in the background.
+
+Any active HopChat clients will respond with their device hostname (e.g., `Adityas-MacBook-Pro`) and their IP address. 
+
+**Navigation:** 
+- Use the **Up** and **Down** arrow keys to highlight a user. 
+- Press **Enter** to instantly connect to them.
+- Tap the **`[ QUIT ]`** button (on mobile) or press `Ctrl-C` to exit.
 
 ### Commands
 
