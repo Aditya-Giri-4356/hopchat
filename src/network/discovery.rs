@@ -21,12 +21,12 @@ fn create_reuse_socket() -> Result<UdpSocket, std::io::Error> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     
     // Allow multiple instances on the same machine to bind to this port
-    socket.set_reuse_address(true)?;
+    let _ = socket.set_reuse_address(true);
     
     #[cfg(not(target_os = "windows"))]
-    socket.set_reuse_port(true)?;
+    let _ = socket.set_reuse_port(true);
 
-    socket.set_broadcast(true)?;
+    let _ = socket.set_broadcast(true);
     
     // Bind to all interfaces on the discovery port
     // [SEC-6] Proper error propagation instead of .unwrap()
@@ -38,10 +38,7 @@ fn create_reuse_socket() -> Result<UdpSocket, std::io::Error> {
     // Join the multicast group for LAN environments where broadcast is disabled
     let multicast_addr = Ipv4Addr::new(239, 255, 255, 250);
     let any_addr = Ipv4Addr::UNSPECIFIED;
-    if let Err(e) = socket.join_multicast_v4(&multicast_addr, &any_addr) {
-        // Some systems/iSH might not fail gracefully or support it, just log it.
-        eprintln!("Warning: Could not join multicast group: {}", e);
-    }
+    let _ = socket.join_multicast_v4(&multicast_addr, &any_addr);
 
     // Set non-blocking before converting to Tokio
     socket.set_nonblocking(true)?;
