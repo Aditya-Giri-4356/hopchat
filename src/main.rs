@@ -179,19 +179,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bcast_ip = local_ip.clone();
     let bcast_port = chat_port;
     tokio::spawn(async move {
+        // Non-fatal: if broadcast fails (e.g. on iSH), directed scan is the fallback
         if let Err(e) = discovery::broadcast_presence(bcast_username, bcast_ip, bcast_port).await {
-            eprintln!("Discovery broadcast error: {}", e);
+            eprintln!("[hopchat] broadcast_presence stopped: {}", e);
         }
     });
 
-    // UDP discovery: listen for peers
+    // UDP discovery: listen for peers (binds to port 9877)
     let listen_ip = local_ip.clone();
     let listen_username = username.clone();
     let listen_peers = peers.clone();
     tokio::spawn(async move {
+        // Non-fatal on iSH: the chat listener (port 9878) also handles discovery
         if let Err(e) = discovery::listen_for_peers(listen_ip, listen_username, listen_peers).await
         {
-            eprintln!("Discovery listen error: {}", e);
+            eprintln!("[hopchat] listen_for_peers stopped: {} — chat port listener still active", e);
         }
     });
 
@@ -242,6 +244,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Spawns an async task that scans the local subnet by sending both discovery
+/// and key exchange packets to all 254 host IPs. This is the critical fallback
+/// for iSH/Termux where broadcast/multicast are unreliable or unsupported.
+fn spawn_subnet_scan(state: &AppState) {
+    let parts: Vec<&str> = state.scanner.local_ip.split('.').collect();
+    if parts.len() != 4 {
+        return;
+    }
+
+    let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+    let socket = state.outbound_socket.clone();
+
+    let discovery_payload = format!(
+        "HOPCHAT|{}|{}|{}",
+        state.username, state.scanner.local_ip, state.chat_port
+    );
+
+    // Build key exchange payload so peers can immediately derive session keys
+    let pub_x25519 = state.keypair.public_key_hex();
+    let pub_ed25519 = state.identity.public_key_hex();
+    let sig = state.identity.sign_payload(pub_x25519.as_bytes());
+    let key_payload = format!(
+        "HOPCHAT_KEY|{}|{}|{}|{}",
+        state.username, pub_x25519, pub_ed25519, sig
+    );
+
+    let disc_port = discovery::DISCOVERY_PORT;
+    let chat_port = crate::PREFERRED_CHAT_PORT;
+
+    tokio::spawn(async move {
+        for i in 1..=254u8 {
+            let target_ip = format!("{}.{}", prefix, i);
+            let target_disc = format!("{}:{}", target_ip, disc_port);
+            let target_chat = format!("{}:{}", target_ip, chat_port);
+
+            // Send discovery to BOTH ports
+            let _ = socket.send_to(discovery_payload.as_bytes(), &target_disc).await;
+            let _ = socket.send_to(discovery_payload.as_bytes(), &target_chat).await;
+            // Send key exchange to BOTH ports
+            let _ = socket.send_to(key_payload.as_bytes(), &target_disc).await;
+            let _ = socket.send_to(key_payload.as_bytes(), &target_chat).await;
+        }
+    });
 }
 
 /// The main event loop that handles UI rendering, input, and outgoing messages.
@@ -324,36 +371,7 @@ async fn run_event_loop(
                 state.scanner.is_visible = !state.scanner.is_visible;
                 if state.scanner.is_visible {
                     state.scanner.selected_index = 0;
-                    
-                    // [CONN-2] Scanner's job is only peer DISCOVERY — send only the
-                    // HOPCHAT|username|ip|port discovery payload to all subnet IPs.
-                    // Key exchange happens automatically after a peer responds and
-                    // appears in the registry. Do NOT send HOPCHAT_KEY during scan.
-                    let parts: Vec<&str> = state.scanner.local_ip.split('.').collect();
-                    if parts.len() == 4 {
-                        let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
-                        let socket = state.outbound_socket.clone();
-                        
-                        let discovery_payload = format!(
-                            "HOPCHAT|{}|{}|{}",
-                            state.username, state.scanner.local_ip, state.chat_port
-                        );
-                        
-                        let disc_port = discovery::DISCOVERY_PORT;
-                        let chat_port = crate::PREFERRED_CHAT_PORT;
-                        
-                        tokio::spawn(async move {
-                            for i in 1..=254 {
-                                let target_ip = format!("{}.{}", prefix, i);
-                                let target_disc = format!("{}:{}", target_ip, disc_port);
-                                let target_chat = format!("{}:{}", target_ip, chat_port);
-                                
-                                // Discovery only — no key exchange during scan
-                                let _ = socket.send_to(discovery_payload.as_bytes(), &target_disc).await;
-                                let _ = socket.send_to(discovery_payload.as_bytes(), &target_chat).await;
-                            }
-                        });
-                    }
+                    spawn_subnet_scan(state);
                 }
             }
 
@@ -439,33 +457,7 @@ async fn run_event_loop(
                             // Trigger the scanner overlay manually
                             state.scanner.is_visible = true;
                             state.scanner.selected_index = 0;
-                            
-                            // [CONN-2] Scanner sends discovery only — no key exchange
-                            let parts: Vec<&str> = state.scanner.local_ip.split('.').collect();
-                            if parts.len() == 4 {
-                                let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
-                                let socket = state.outbound_socket.clone();
-                                
-                                let discovery_payload = format!(
-                                    "HOPCHAT|{}|{}|{}",
-                                    state.username, state.scanner.local_ip, state.chat_port
-                                );
-                                
-                                let disc_port = discovery::DISCOVERY_PORT;
-                                let chat_port = crate::PREFERRED_CHAT_PORT;
-                                
-                                tokio::spawn(async move {
-                                    for i in 1..=254 {
-                                        let target_ip = format!("{}.{}", prefix, i);
-                                        let target_disc = format!("{}:{}", target_ip, disc_port);
-                                        let target_chat = format!("{}:{}", target_ip, chat_port);
-                                        
-                                        // Discovery only — no key exchange during scan
-                                        let _ = socket.send_to(discovery_payload.as_bytes(), &target_disc).await;
-                                        let _ = socket.send_to(discovery_payload.as_bytes(), &target_chat).await;
-                                    }
-                                });
-                            }
+                            spawn_subnet_scan(state);
                             continue;
                         }
                         cli::commands::CommandResult::Ignored => {}

@@ -17,7 +17,7 @@ pub struct Peer {
     pub username: String,
     /// The peer's IP address
     pub ip: String,
-    /// The peer's TCP port for messaging
+    /// The peer's UDP port for messaging
     pub port: u16,
     /// The device hostname if resolved
     pub hostname: Option<String>,
@@ -26,7 +26,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    /// Returns the peer's socket address for TCP connections.
+    /// Returns the peer's socket address for UDP connections.
     pub fn socket_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
         format!("{}:{}", self.ip, self.port).parse()
     }
@@ -35,14 +35,13 @@ impl Peer {
 /// A thread-safe, shared registry of active peers.
 pub type PeerRegistry = Arc<Mutex<HashMap<String, Peer>>>;
 
-/// [SEC-7] Background task that removes peers not seen within the last 15 seconds.
-/// Uses a two-phase approach: collect stale keys with a brief read lock,
-/// then re-acquire for targeted removal. This avoids holding the exclusive
-/// lock for a full O(n) retain scan every second, preventing it from
-/// blocking the listener hot path.
+/// Background task that removes peers not seen within the timeout.
+/// Uses 60-second timeout instead of 15s — the old value was too aggressive
+/// and evicted peers before they could complete key exchange, especially
+/// on iSH where discovery is slow and unreliable.
 pub async fn cleanup_task(registry: PeerRegistry) {
-    let mut tick = interval(Duration::from_secs(1));
-    let timeout = Duration::from_secs(15);
+    let mut tick = interval(Duration::from_secs(5));
+    let timeout = Duration::from_secs(60);
 
     loop {
         tick.tick().await;
@@ -86,9 +85,3 @@ pub fn resolve_hostname(registry: PeerRegistry, username: String, ip: String) {
         }
     });
 }
-
-// CHANGES:
-// [SEC-7] cleanup_task: Replaced single-pass registry_lock.retain() with a two-phase
-//         approach. Phase 1 collects stale keys under a brief lock. Phase 2 re-acquires
-//         the lock only if removals are needed, doing targeted remove() calls instead
-//         of a full O(n) retain scan. Added yield_now() for single-core fairness.
