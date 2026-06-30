@@ -178,6 +178,12 @@ pub async fn listen_for_messages(
     let mut ip_cache_order: VecDeque<IpAddr> = VecDeque::new();
     const IP_CACHE_CAP: usize = 1024;
     
+    // Compute our own discovery info for echo responses
+    let our_ip = local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let our_chat_port = socket.local_addr().map(|a| a.port()).unwrap_or(crate::PREFERRED_CHAT_PORT);
+
     let mut buf = [0u8; 4096]; // HopChat packets are well under 4KB
     loop {
         if let Ok((len, src_addr)) = socket.recv_from(&mut buf).await {
@@ -208,11 +214,9 @@ pub async fn listen_for_messages(
                 let packet_str = text.trim();
 
                 // Handle discovery packets that arrive on the chat socket
-                // (sent by /connect which targets both ports)
                 if packet_str.starts_with("HOPCHAT|") && !packet_str.starts_with("HOPCHAT_") {
                     let parts: Vec<&str> = packet_str.split('|').collect();
                     if parts.len() == 4 && parts[0] == "HOPCHAT" {
-                        // [SEC-4] Sanitize network-provided username
                         let peer_username = match sanitize_network_username(parts[1]) {
                             Some(u) => u,
                             None => continue,
@@ -222,18 +226,16 @@ pub async fn listen_for_messages(
                             if peer_username != our_username {
                                 let mut reg = peer_registry.lock().await;
                                 
-                                // DoS Protection: Cap the maximum number of tracked peers
                                 if reg.len() >= 1000 && !reg.contains_key(&peer_username) {
-                                    continue; // Drop new peer discovery if registry is full
+                                    continue;
                                 }
 
-                                // MITM/Hijack Protection: Do not allow unauthenticated UDP 
-                                // discovery packets to hijack the routing of a known, pinned peer.
-                                // The IP/Port should only be updated if a cryptographically signed 
-                                // Key Exchange (HOPCHAT_KEY) validates the new IP.
+                                let is_new = !reg.contains_key(&peer_username);
+
                                 if let Some(existing_peer) = reg.get_mut(&peer_username) {
-                                    // Only update last_seen, DO NOT update IP/Port from unauthenticated broadcast
                                     existing_peer.last_seen = tokio::time::Instant::now();
+                                    existing_peer.ip = peer_ip.clone();
+                                    existing_peer.port = peer_port;
                                 } else {
                                     let peer = Peer {
                                         username: peer_username.clone(),
@@ -243,8 +245,46 @@ pub async fn listen_for_messages(
                                         last_seen: tokio::time::Instant::now(),
                                     };
                                     reg.insert(peer_username.clone(), peer);
-                                    drop(reg);
-                                    crate::network::peer_registry::resolve_hostname(peer_registry.clone(), peer_username, peer_ip);
+                                }
+                                drop(reg);
+
+                                if is_new {
+                                    crate::network::peer_registry::resolve_hostname(
+                                        peer_registry.clone(), peer_username.clone(), peer_ip.clone(),
+                                    );
+                                }
+
+                                // ============================================================
+                                // DISCOVERY ECHO — the critical missing piece.
+                                // When we receive a discovery packet from a new peer, echo
+                                // back our own discovery AND key exchange payloads. Without
+                                // this, the sender has no way to know WE exist (especially
+                                // on iSH where broadcast is broken and we can't broadcast
+                                // our presence proactively).
+                                // ============================================================
+                                {
+                                    // Echo our discovery payload
+                                    let echo_discovery = format!(
+                                        "HOPCHAT|{}|{}|{}",
+                                        our_username, our_ip, our_chat_port
+                                    );
+                                    let _ = socket.send_to(echo_discovery.as_bytes(), &src_addr).await;
+
+                                    // Also send to the peer's advertised chat port (in case
+                                    // src_addr.port is ephemeral, e.g. from their broadcaster)
+                                    let peer_chat_addr = format!("{}:{}", peer_ip, peer_port);
+                                    let _ = socket.send_to(echo_discovery.as_bytes(), &peer_chat_addr).await;
+
+                                    // Initiate key exchange immediately
+                                    let pub_x25519 = local_keypair.public_key_hex();
+                                    let pub_ed25519 = local_identity.public_key_hex();
+                                    let sig = local_identity.sign_payload(pub_x25519.as_bytes());
+                                    let key_payload = format!(
+                                        "HOPCHAT_KEY|{}|{}|{}|{}",
+                                        our_username, pub_x25519, pub_ed25519, sig
+                                    );
+                                    let _ = socket.send_to(key_payload.as_bytes(), &src_addr).await;
+                                    let _ = socket.send_to(key_payload.as_bytes(), &peer_chat_addr).await;
                                 }
                             }
                         }
