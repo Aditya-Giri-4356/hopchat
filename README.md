@@ -133,31 +133,40 @@ cd hopchat-v1
 cargo run --release
 ```
 
-### Interactive Subnet Scanner
+### Interactive Subnet Scanner & Mobile Detection
 
-Want to see who is online before connecting? HopChat comes with a built-in subnet scanner overlay.
+Want to see who is online before connecting? HopChat comes with a built-in subnet scanner overlay that works natively on all devices.
 
-**How to use:**
-- **Desktop:** Press the **`Tab`** key while inside HopChat.
-- **Mobile (iSH / Termux):** Since virtual keyboards often don't emit the Tab keycode, simply type the **`/scan`** command in the chat box and press Enter.
+Because iOS (iSH) and Android (Termux) use emulated or restrictive network stacks, standard `255.255.255.255` UDP broadcasts often fail silently. To guarantee peer discovery, HopChat implements a **Robust UDP Subnet Sweep**:
+1. It creates a dummy UDP socket to `8.8.8.8` to query the operating system's routing table, exposing the true local WiFi IP (e.g., `192.168.1.7`) even when emulators try to default to `127.0.0.1`.
+2. It automatically calculates your active `/24` subnet.
+3. It rapidly blasts directed UDP Unicast packets to all 254 possible IP addresses on the network on both discovery and chat ports.
 
-This will instantly pop open an interactive overlay. HopChat will automatically discover your local Wi-Fi subnet (e.g. `192.168.1.X`) and asynchronously blast UDP discovery packets to all 254 possible addresses in the background.
+**How to use the scanner:**
+- **Desktop (macOS / Linux):** Press the **`Tab`** key while inside HopChat.
+- **Mobile (iSH / Termux):** Virtual keyboards often lack a physical Tab key. Simply type the **`/scan`** command in the chat box and press `Enter`.
 
-Any active HopChat clients will respond with their device hostname (e.g., `Adityas-MacBook-Pro`) and their IP address. 
+This will instantly pop open an interactive overlay displaying active HopChat peers.
 
 **Navigation:** 
 - Use the **Up** and **Down** arrow keys to highlight a user. 
-- Press **Enter** to instantly connect to them.
-- Tap the **`[ QUIT ]`** button (on mobile) or press `Ctrl-C` to exit.
+- Press **Enter** to instantly connect to them and initiate a Diffie-Hellman key exchange.
+- Press `Ctrl-C` or `ESC` to close the scanner.
+
+### Mobile UI Differences & Touch Support
+HopChat automatically scales to fit mobile screen resolutions. It also includes full terminal mouse/touch support!
+- **Desktop**: Close the app via `Ctrl+C` or `ESC`.
+- **Mobile**: A dedicated, touchable **`[ QUIT ]`** button is rendered directly in the Terminal UI. Simply tap the button on your touchscreen to safely exit the app without needing to open your virtual keyboard's control ribbon.
 
 ### Commands
 
 Inside the chat buffer, you can execute special slash commands:
 
-- /help - Show the contextual help menu.
-- /peers - List all currently active peers, along with their resolved local IP addresses.
-- /connect <ip> - Manually fire a handshake to a specific IP Address. (The **`Tab`** Subnet Scanner is highly recommended over this).
-- /quit - Safely exit the application. Alternatively, press CTRL-C or ESC.
+- `/help` - Show the contextual help menu.
+- `/scan` - Launch the Interactive Subnet Scanner (especially useful on mobile).
+- `/peers` - List all currently active peers, along with their resolved local IP addresses.
+- `/connect <ip>` - Manually fire a handshake to a specific IP Address. (The Subnet Scanner is highly recommended over this).
+- `/quit` - Safely exit the application. Alternatively, tap the **`[ QUIT ]`** button on mobile.
 
 ---
 
