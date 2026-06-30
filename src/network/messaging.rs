@@ -221,7 +221,9 @@ pub async fn listen_for_messages(
                             Some(u) => u,
                             None => continue,
                         };
-                        let peer_ip = parts[2].to_string();
+                        
+                        // Trust actual packet source, not payload IP
+                        let peer_ip = src_addr.ip().to_string();
                         if let Ok(peer_port) = parts[3].parse::<u16>() {
                             if peer_username != our_username {
                                 let mut reg = peer_registry.lock().await;

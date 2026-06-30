@@ -119,10 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Step 1: Login ---
     let username = prompt_username();
 
-    // Detect local IP address
-    let local_ip = local_ip_address::local_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    // Detect local IP address robustly
+    let local_ip = get_local_ip();
 
     println!("\n  Starting HOPCHAT as '{}' on {}:{}", username, local_ip, PREFERRED_CHAT_PORT);
     println!("  Press any key to enter the chat...");
@@ -289,6 +287,21 @@ fn spawn_subnet_scan(state: &AppState) {
             let _ = socket.send_to(key_payload.as_bytes(), &target_chat).await;
         }
     });
+}
+
+/// Returns the device's local IP address robustly by querying the OS routing table.
+/// This works on iSH where `local_ip_address` often fails or returns 127.0.0.1.
+fn get_local_ip() -> String {
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                return addr.ip().to_string();
+            }
+        }
+    }
+    local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
 /// The main event loop that handles UI rendering, input, and outgoing messages.

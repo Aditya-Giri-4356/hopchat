@@ -113,7 +113,7 @@ pub async fn listen_for_peers(
 
     let mut buf = [0u8; 1024];
     loop {
-        if let Ok((len, _src)) = socket.recv_from(&mut buf).await {
+        if let Ok((len, src_addr)) = socket.recv_from(&mut buf).await {
             if let Ok(text) = std::str::from_utf8(&buf[..len]) {
                 let packet_str = text.trim();
                 let parts: Vec<&str> = packet_str.split('|').collect();
@@ -124,7 +124,10 @@ pub async fn listen_for_peers(
                         Some(u) => u,
                         None => continue,
                     };
-                    let packet_ip = parts[2].to_string();
+                    
+                    // Trust the actual packet source, not the advertised payload IP.
+                    // This fixes the issue where iSH advertises 127.0.0.1 due to failing IP detection.
+                    let packet_ip = src_addr.ip().to_string();
                     
                     if let Ok(packet_port) = parts[3].parse::<u16>() {
                         if packet_username == own_username {
