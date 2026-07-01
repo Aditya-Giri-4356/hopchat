@@ -179,9 +179,8 @@ pub async fn listen_for_messages(
     const IP_CACHE_CAP: usize = 1024;
     
     // Compute our own discovery info for echo responses
-    let our_ip = local_ip_address::local_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    // MUST use get_local_ip() — local_ip_address::local_ip() returns 127.0.0.1 on iSH
+    let our_ip = crate::get_local_ip();
     let our_chat_port = socket.local_addr().map(|a| a.port()).unwrap_or(crate::PREFERRED_CHAT_PORT);
 
     let mut buf = [0u8; 4096]; // HopChat packets are well under 4KB
@@ -199,7 +198,7 @@ pub async fn listen_for_messages(
                         rate_limits.remove(&evict_ip);
                     }
                 }
-                rate_limits.insert(ip, TokenBucket::new(20, 5));
+                rate_limits.insert(ip, TokenBucket::new(200, 100));
                 rate_limit_order.push_back(ip);
             }
 
@@ -258,11 +257,10 @@ pub async fn listen_for_messages(
 
                                 // ============================================================
                                 // DISCOVERY ECHO — the critical missing piece.
-                                // When we receive a discovery packet from a new peer, echo
+                                // When we receive a discovery packet from a peer, echo
                                 // back our own discovery AND key exchange payloads. Without
                                 // this, the sender has no way to know WE exist (especially
-                                // on iSH where broadcast is broken and we can't broadcast
-                                // our presence proactively).
+                                // on iSH where broadcast is broken).
                                 // ============================================================
                                 {
                                     // Echo our discovery payload
@@ -270,11 +268,10 @@ pub async fn listen_for_messages(
                                         "HOPCHAT|{}|{}|{}",
                                         our_username, our_ip, our_chat_port
                                     );
+                                    // Send to the actual src_addr (covers ephemeral ports)
                                     let _ = socket.send_to(echo_discovery.as_bytes(), &src_addr).await;
-
-                                    // Also send to the peer's advertised chat port (in case
-                                    // src_addr.port is ephemeral, e.g. from their broadcaster)
-                                    let peer_chat_addr = format!("{}:{}", peer_ip, peer_port);
+                                    // Also send to the peer's CHAT port (the canonical listener)
+                                    let peer_chat_addr = format!("{}:{}", peer_ip, crate::PREFERRED_CHAT_PORT);
                                     let _ = socket.send_to(echo_discovery.as_bytes(), &peer_chat_addr).await;
 
                                     // Initiate key exchange immediately
@@ -365,17 +362,22 @@ pub async fn listen_for_messages(
                                     {
                                         let mut reg = peer_registry.lock().await;
                                         let is_new = !reg.contains_key(&sender_username);
-                                        let ip = src_addr.ip().to_string();
+                                        let peer_ip = src_addr.ip().to_string();
+                                        // Use the PREFERRED_CHAT_PORT, NOT src_addr.port().
+                                        // src_addr.port() is the sender's ephemeral outbound port
+                                        // (e.g. 49123) which will be dead by the time we try to
+                                        // send a message. The chat listener is on PREFERRED_CHAT_PORT.
+                                        let peer_port = crate::PREFERRED_CHAT_PORT;
                                         reg.insert(sender_username.clone(), Peer {
                                             username: sender_username.clone(),
-                                            ip: ip.clone(),
-                                            port: src_addr.port(),
+                                            ip: peer_ip.clone(),
+                                            port: peer_port,
                                             hostname: None,
                                             last_seen: tokio::time::Instant::now(),
                                         });
                                         drop(reg);
                                         if is_new {
-                                            crate::network::peer_registry::resolve_hostname(peer_registry.clone(), sender_username.clone(), ip);
+                                            crate::network::peer_registry::resolve_hostname(peer_registry.clone(), sender_username.clone(), peer_ip);
                                         }
                                     }
 

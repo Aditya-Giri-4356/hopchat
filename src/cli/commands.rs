@@ -101,9 +101,8 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
                 if target_ip.parse::<std::net::IpAddr>().is_err() {
                     push_system_msg(&format!("Invalid IP address: {}", target_ip));
                 } else {
-                    let my_ip = local_ip_address::local_ip()
-                        .map(|ip| ip.to_string())
-                        .unwrap_or_else(|_| "127.0.0.1".to_string());
+                    // Use robust IP detection (not local_ip_address which fails on iSH)
+                    let my_ip = crate::get_local_ip();
 
                     // Build discovery payload
                     let discovery_payload = format!(

@@ -291,7 +291,7 @@ fn spawn_subnet_scan(state: &AppState) {
 
 /// Returns the device's local IP address robustly by querying the OS routing table.
 /// This works on iSH where `local_ip_address` often fails or returns 127.0.0.1.
-fn get_local_ip() -> String {
+pub fn get_local_ip() -> String {
     if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
         if socket.connect("8.8.8.8:80").is_ok() {
             if let Ok(addr) = socket.local_addr() {
