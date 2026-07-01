@@ -96,11 +96,3 @@ pub fn compute_layout(area: Rect) -> AppLayout {
     }
 }
 
-// CHANGES:
-// [UI-MOB-1] Reverted mobile threshold to `area.width < 100`. Removed the
-//            `area.height >= area.width` condition that was incorrectly triggering
-//            on tall desktop terminals.
-// [UI-MOB-3] Added `mobile_status: Option<Rect>` for the left portion of the quit
-//            row, used to render a compact status bar on mobile. Desktop sets it to None.
-// [UI-MOB-4] Derived Clone on AppLayout so the last computed layout can be cached
-//            on AppState for reliable click detection.

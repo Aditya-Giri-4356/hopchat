@@ -65,7 +65,7 @@ pub async fn broadcast_presence(
         None
     };
 
-    let mut tick = interval(Duration::from_secs(3));
+    let mut tick = interval(Duration::from_secs(10));
     loop {
         tick.tick().await;
 
@@ -76,8 +76,7 @@ pub async fn broadcast_presence(
 
         // Method 3: Directed subnet sweep — THE RELIABLE FALLBACK.
         // Sends to every IP on the subnet, targeting BOTH the discovery port
-        // (9877) and the chat port (9878). This ensures the packet reaches
-        // at least one listener on the target device.
+        // (9877) and the chat port (9878).
         if let Some(ref prefix) = subnet_prefix {
             for i in 1..=254u8 {
                 let target = format!("{}.{}:{}", prefix, i, DISCOVERY_PORT);

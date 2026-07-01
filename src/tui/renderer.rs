@@ -58,7 +58,7 @@ pub fn render_ui(
 
 /// Renders the top header bar.
 fn render_header(frame: &mut Frame, area: Rect) {
-    let header = Paragraph::new(" HOPCHAT v2.1.1")
+    let header = Paragraph::new(" HOPCHAT v2.2.0")
         .style(
             Style::default()
                 .fg(Color::Cyan)
@@ -212,33 +212,28 @@ fn render_chat(
     };
 
     // Filter messages relevant to the selected conversation
-    // Use the messages slice directly since main.rs filters it for us
-    let mut sorted_messages = messages.to_vec();
-    // [UI-DESK-1] Sort by timestamp first, then by id as tiebreaker.
-    // This ensures cross-peer messages display in correct chronological order
-    // regardless of the random seed used for message IDs.
-    sorted_messages.sort_by(|a, b| {
-        a.timestamp.cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id))
+    // Build sorted indices to avoid cloning the entire messages Vec every frame
+    let mut indices: Vec<usize> = (0..messages.len()).collect();
+    indices.sort_by(|&a, &b| {
+        messages[a].timestamp.cmp(&messages[b].timestamp)
+            .then_with(|| messages[a].id.cmp(&messages[b].id))
     });
 
-    let chat_lines: Vec<Line> = sorted_messages
+    let chat_lines: Vec<Line> = indices
         .iter()
-        .map(|msg| {
+        .map(|&idx| {
+            let msg = &messages[idx];
             let label = if msg.sender == username {
                 "YOU"
             } else {
                 &msg.sender
             };
-            
-            // Format unix timestamp to a simple %H:%M using chrono under the hood,
-            // or just use naive formatting if chrono is preferred.
-            // But we already dropped chrono in ChatMessage. Let's just restore chrono usage here 
-            // for display purposes since it's already in the dependencies.
+
             let dt = chrono::DateTime::from_timestamp(msg.timestamp as i64, 0)
                 .unwrap_or_default()
                 .with_timezone(&chrono::Local);
             let time = dt.format("%H:%M");
-            
+
             Line::from(vec![
                 Span::styled(
                     format!(" [{}] ", time),
@@ -262,10 +257,8 @@ fn render_chat(
     // Auto-scroll: only show the last N lines that fit
     let visible_height = area.height.saturating_sub(2) as usize;
     let start = chat_lines.len().saturating_sub(visible_height);
-    let visible_lines: Vec<Line> = chat_lines[start..].to_vec();
 
-    // [UI-DESK-5] Add word wrapping so long messages are not clipped at terminal width
-    let chat = Paragraph::new(visible_lines)
+    let chat = Paragraph::new(chat_lines[start..].to_vec())
         .wrap(Wrap { trim: false })
         .block(
             Block::default()
@@ -399,15 +392,3 @@ fn render_scanner_popup(frame: &mut Frame, peers: &[Peer], selected_index: usize
     state.select(Some(selected_index));
     frame.render_stateful_widget(list, popup_area, &mut state);
 }
-
-// CHANGES:
-// [UI-DESK-1] render_chat: Sort by timestamp.then_with(id) instead of id alone.
-// [UI-DESK-2] render_network_status: Shows honest "Online: CONNECTED/SCANNING" and
-//             actual peer count. BLE shows "--" instead of fake "00".
-// [UI-DESK-3] render_input: Added comment documenting cursor_pos dependency on main.rs.
-// [UI-DESK-5] render_chat: Added .wrap(Wrap { trim: false }) to prevent clipping.
-// [UI-DESK-6] render_scanner_popup: Clamped popup_height to area.height-4. Added
-//             scroll position footer as a ListItem.
-// [UI-MOB-2] render_friends: Changed selected style to fg(Black)/bg(Green) with ">>" marker.
-// [UI-MOB-3] Added render_mobile_status() for the compact mobile status bar.
-// [UI-MOB-6] render_scanner_popup: popup_width scaled to area.width-4, max 60.

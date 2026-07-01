@@ -173,9 +173,3 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
     CommandResult::Handled
 }
 
-// CHANGES:
-// [CONN-1] /connect now looks up the peer's actual registered port from the peer
-//          registry before sending. Falls back to PREFERRED_CHAT_PORT only for cold
-//          connects where the peer is not yet in the registry.
-// [UI-MOB-5] /quit now sets state.quit_requested AtomicBool to true, enabling
-//            reliable exit on mobile terminals where ESC/Ctrl-C are unavailable.

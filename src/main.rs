@@ -88,7 +88,7 @@ pub struct AppState {
 /// Sanitizes input to prevent pipe-injection attacks on the discovery protocol.
 fn prompt_username() -> String {
     print!("\n  ╔══════════════════════════════════╗\n");
-    print!("  ║        HOPCHAT v2.1.1            ║\n");
+    print!("  ║        HOPCHAT v2.2.0            ║\n");
     print!("  ╠══════════════════════════════════╣\n");
     print!("  ║  Enter your username:            ║\n");
     print!("  ╚══════════════════════════════════╝\n");
@@ -574,18 +574,3 @@ async fn run_event_loop(
     Ok(())
 }
 
-// CHANGES:
-// [CONN-1] Scanner and TriggerScan now use discovery::DISCOVERY_PORT and
-//          PREFERRED_CHAT_PORT correctly (scanner is discovery-only so this is fine).
-// [CONN-2] ToggleScanner and TriggerScan: Removed HOPCHAT_KEY from scanner broadcasts.
-//          Scanner now sends ONLY discovery payloads. Key exchange is deferred to
-//          /connect after a user selects a peer.
-// [CONN-4] Created tofu_registry (TofuRegistry) on AppState and passed it into
-//          listen_for_messages as a parameter.
-// [CONN-7] DedupCache initialized as HashSet::new() instead of VecDeque::new().
-// [UI-DESK-4] Character and Backspace arms: cursor_pos translated to byte offset
-//             via char_indices().nth() before String::insert/remove.
-// [UI-MOB-4] Cached last_quit_button_rect from draw closure. Click handler uses
-//            cached value instead of recomputing from terminal.size().unwrap_or_default().
-// [UI-MOB-5] Added quit_requested: Arc<AtomicBool> to AppState. Checked at loop top.
-//            /quit command sets it, enabling reliable exit on mobile.

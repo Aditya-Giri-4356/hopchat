@@ -500,17 +500,3 @@ pub async fn listen_for_messages(
         }
     }
 }
-
-// CHANGES:
-// [CONN-4] pinned_identities moved out of this function into AppState as TofuRegistry.
-//          Passed in as a parameter. Persists for process lifetime.
-// [CONN-5] ip_to_username capped at 1024 entries with VecDeque-based LRU eviction.
-// [CONN-6] rate_limits capped at 4096 entries with VecDeque-based LRU eviction.
-//          Existing IPs update in-place without re-queuing.
-// [CONN-7] DedupCache changed from VecDeque<u64> to HashSet<u64> for O(1) contains().
-//          cache.clear() at capacity instead of pop_front.
-// [CONN-8] send_message_with_retry: Remove stale sender before inserting fresh on each
-//          retry. On send failure, immediately remove the just-inserted sender.
-// [SEC-4] All network-provided usernames sanitized via sanitize_network_username().
-// [SEC-5] TokenBucket replaced with integer microsecond accounting (millitokens).
-//         No floating-point arithmetic in the rate limiter.
