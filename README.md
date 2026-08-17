@@ -1,6 +1,6 @@
 # HOPCHAT
 
-**Status: Production-Hardened (v2.2.0)**
+**Status: Production-Hardened (v2.3.0)**
 
 
 HOPCHAT is a lightweight, decentralized, deeply encrypted terminal messenger written in Rust. It enables real-time peer-to-peer texting across local networks, isolated WiFi environments, and phone hotspots—no internet access required.
@@ -15,7 +15,7 @@ Tactical Deployment: Read about the viability of HOPCHAT in contested Military a
 
 This repository contains two versions of HopChat to preserve development history and allow comparison:
 
-*   **HopChat v2 (Root Directory)**: The primary, production-hardened codebase featuring TOFU security identity, optimized Tokio runtime, low stack allocations, unified socket networking, and O(1) decryption caching.
+*   **HopChat v2 (Root Directory)**: The primary, production-hardened codebase featuring persistent TOFU identity pinning, sliding-window replay protection, signed discovery broadcasts, constant-time verification, optimized Tokio runtime, low stack allocations, unified socket networking, and O(1) decryption caching.
 *   **[HopChat v1 (Legacy)](hopchat-v1/)**: The original proof-of-concept codebase. It remains accessible in the `hopchat-v1/` directory for historical reference, research, or testing.
 *   **[CHANGELOG.md](CHANGELOG.md)**: A deeply detailed technical walkthrough of all changes, optimizations, and bug fixes made between version 1.0.0 and version 2.0.0.
 
@@ -30,11 +30,11 @@ This repository contains two versions of HopChat to preserve development history
 └────────▲─────────┘     │   │     └────────▲─────────┘
          │               │   │              │
      Multicast           ▼   ▼      Direct Unicast Fallback
-    Discovery        ┌───────────┐      (/connect IP)
-      (UDP)          │   Phone   │          (UDP)
-                     │  Hotspot  │
-                     │ (Offline) │
-                     └───────────┘
+     Discovery        ┌───────────┐      (/connect IP)
+       (UDP)          │   Phone   │          (UDP)
+                      │  Hotspot  │
+                      │ (Offline) │
+                      └───────────┘
 ```
 
 ---
@@ -43,14 +43,19 @@ This repository contains two versions of HopChat to preserve development history
 
 - **Offline-First Networking**: Communicates purely via LAN IP tables. Works on phone hotspots, disconnected routers, and isolated local ad-hoc networks.
 - **Identity-Anchored Security**: Every node generates a persistent Ed25519 long-term identity to prevent username spoofing.
+- **Signed Discovery Broadcasts**: Discovery packets are signed with the sender's Ed25519 key and validated against a 30-second timestamp freshness window to eliminate discovery spoofing and broadcast replays.
+- **Persistent TOFU Trust Database**: Pinned peer identities are stored in `~/.hopchat_trust_db` (with `0600` permissions on Unix). If a peer's public key changes across restarts, HOPCHAT detects and flags the potential MITM attack.
+- **Sliding-Window Replay Protection**: Each active peer session maintains a 64-message sequence sliding bitmask ($O(1)$ memory & CPU), immediately dropping replayed or out-of-order packets.
+- **Constant-Time Verification**: Prevents timing side-channel attacks on identity signatures, TOFU security codes, and session material using constant-time byte comparisons (`ct_eq`).
 - **Metadata Masking**: All routing headers (sender, receiver, id, timestamp) are encrypted inside the XChaCha20 payload. Observers only see raw hex bytes.
 - **Dynamic End-to-End Encryption**: Every session is uniquely secured using x25519-dalek Diffie-Hellman key derivation and hashed via sha2::Sha256 to create 256-bit symmetric session keys.
 - **DoS Mitigation**: Built-in Token-Bucket rate limiting on the UDP listener to prevent network floods from crashing your node.
-- **Robust UDP Protocol**: Replaces TCP handshakes with custom UDP structs. Includes deduplication caching, automatic ACKs, and a 3-strike 500ms jittered retransmission loop to guarantee delivery over spotty WiFi.
-- **High Fallback Redundancy**: Sends discovery broadcasts parallel via IPV4 Multicast (239.255.255.250) and Broadcast Fallbacks (255.255.255.255).
-- **iSH Terminal Support**: Works flawlessly inside iOS Alpine shells using the manual direct-IP bypass (/connect <ip>).
-- **Sub-2% Resource Usage**: Powered by tokio asynchronous lightweight tasks spanning under 30MB of RAM.
-- **The Killswitch**: Includes a one-click killswitch.sh script to instantly purge the application and source binaries from your environment.
+- **Robust UDP Protocol**: Replaces TCP handshakes with custom UDP structs. Includes automatic ACKs, deduplication, and a 3-strike 500ms jittered retransmission loop to guarantee delivery over spotty WiFi.
+- **O(1) Memory Pruning**: Uses `VecDeque` ring buffers for chat history so message pruning executes in constant time with zero array shifts.
+- **High Fallback Redundancy**: Sends discovery broadcasts parallel via IPV4 Multicast (239.255.255.250), Broadcast Fallbacks (255.255.255.255), and directed subnet sweeps.
+- **iSH Terminal Support**: Works flawlessly inside iOS Alpine shells using the manual direct-IP bypass (/connect <ip>) and subnet sweep.
+- **Sub-2% Resource Usage**: Powered by tokio asynchronous lightweight tasks spanning under 30MB of RAM and a 1.3MB stripped binary.
+- **The Hardened Killswitch**: Includes a verified `killswitch.sh` script with safety checks and confirmation prompts to cleanly purge the application, trust database, identity keys, and source code.
 
 ---
 
@@ -117,12 +122,35 @@ cargo install --git https://github.com/Aditya-Giri-4356/hopchat.git
 HOPCHAT is a single-binary application. Just run it from your terminal:
 
 ```bash
+hopchat
+# OR from source:
 cargo run --release
-# OR
-./target/release/hopchat
 ```
 
-You'll be prompted to enter a username. Once supplied, the terminal UI (TUI) will launch and HOPCHAT will automatically discover peers on your network.
+### Command-Line Arguments
+
+HopChat v2.3.0 supports zero-dependency CLI arguments:
+
+```bash
+Usage: hopchat [OPTIONS]
+
+Options:
+  -p, --port <PORT>        Chat UDP port (default: 9878)
+  -u, --username <NAME>    Username (skips the interactive prompt)
+  -h, --help               Show help message
+      --version            Show version information
+```
+
+**Examples:**
+```bash
+# Start with username pre-set
+hopchat -u alice
+
+# Bind to a custom port
+hopchat -p 9900 -u bob
+```
+
+---
 
 ### Running the Legacy v1 Version
 
@@ -172,22 +200,25 @@ Inside the chat buffer, you can execute special slash commands:
 
 ## Security Model
 
-1. **Identity:** At first boot, HOPCHAT generates a persistent Ed25519 identity key saved to ~/.hopchat_id.
+1. **Identity:** At first boot, HOPCHAT generates a persistent Ed25519 identity key saved to `~/.hopchat_id_<username>` (`0600` permissions on Unix).
 2. **Key Agreement:** Sessions use ephemeral X25519 DH exchange. Handshakes are signed with the Ed25519 identity to prevent spoofing and MITM.
-3. **Verification:** Users can verify out-of-band using the 16-character TOFU (Trust On First Use) Security Codes displayed in the UI.
-4. **Encryption:** Payloads are XChaCha20-Poly1305 encrypted. Unlike previous versions, all metadata is now hidden inside the cipher.
-5. **Resilience:** Built-in IP rate limiting prevents DoS flood attacks.
+3. **Persistent TOFU Trust DB:** Discovered peer public key fingerprints are pinned in `~/.hopchat_trust_db`. If an existing peer's key changes on subsequent launches, the connection is rejected and flagged as a potential MITM attack.
+4. **Signed Discovery:** Discovery packets contain an Ed25519 signature and timestamp to prevent broadcast spoofing.
+5. **Replay Protection:** Incoming messages are verified against a per-peer 64-message sliding sequence bitmask, discarding duplicates and expired packets.
+6. **Constant-Time Verification:** All cryptographic fingerprint comparisons use constant-time algorithms (`ct_eq`) to eliminate timing side-channels.
+7. **Encryption:** Payloads are XChaCha20-Poly1305 encrypted. All routing metadata is hidden inside the cipher.
+8. **Resilience:** Built-in IP rate limiting prevents DoS flood attacks.
 
 ---
 
 ## The Killswitch
 
-HOPCHAT ships with a privacy-preserving uninstaller script. If you need to completely erase the program, the binaries, your cargo package definitions, and the source code from your computer simultaneously, run:
+HOPCHAT ships with a privacy-preserving uninstaller script. If you need to completely erase the program, the binaries, your cargo package definitions, identity keys, trust DB, and the source code from your computer simultaneously, run:
 
 ```bash
 ./killswitch.sh
 ```
-This will forcefully uninstall hopchat from the Cargo package manager and then permanently delete the $REPO_DIR containing the project code.
+This performs a safety verification check against `Cargo.toml`, requests interactive confirmation `[y/N]`, forcefully uninstalls hopchat from Cargo, wipes identity keys (`~/.hopchat_id*`) & trust databases (`~/.hopchat_trust_db`), and then permanently deletes the `$REPO_DIR` containing the project code.
 
 ---
 
