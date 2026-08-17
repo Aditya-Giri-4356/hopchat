@@ -179,9 +179,3 @@ impl LocalIdentity {
     }
 }
 
-// CHANGES:
-// [SEC-2] verify_signature: Replaced try_into().unwrap() with explicit fallible
-//         conversion using match. Function is now entirely infallible.
-// [SEC-3] secret_seed is now private (no pub). Added cached signing_key,
-//         verifying_key, and tofu fields computed once in init_cached().
-//         Added Drop impl that volatile-zeroes the secret seed on deallocation.

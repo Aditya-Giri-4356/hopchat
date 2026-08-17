@@ -7,6 +7,8 @@
 
 use crate::AppState;
 use crate::chat::messages::ChatMessage;
+use crate::network::messaging;
+use std::collections::VecDeque;
 
 /// Represents the result of parsing a CLI command
 pub enum CommandResult {
@@ -19,16 +21,12 @@ pub enum CommandResult {
 }
 
 /// Parses and executes an input string if it starts with a `/`.
-/// Returns `CommandResult` indicating how the main loop should proceed.
 pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult {
     let cmd = input.trim();
     if !cmd.starts_with('/') {
         return CommandResult::Ignored;
     }
 
-    // Isolate the current selected peer to show system messages contextually
-    // If no peers exist, we'll just push to a global/system log, but for
-    // simplicity, MVP attaches system replies to the active window.
     let active_peer_username = {
         let peers_lock = state.peers.lock().await;
         let peers: Vec<_> = peers_lock.values().cloned().collect();
@@ -49,9 +47,9 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
             let mut history_lock = history.lock().await;
             let list = history_lock
                 .entry(target_clone)
-                .or_insert_with(Vec::new);
-            list.push(sys_msg);
-            if list.len() > 1000 { list.remove(0); }
+                .or_insert_with(VecDeque::new);
+            list.push_back(sys_msg);
+            if list.len() > 1000 { list.pop_front(); }
         });
     };
 
@@ -85,9 +83,6 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
             }
         }
         "/quit" => {
-            // [UI-MOB-5] Set the shared quit flag so the main loop exits cleanly.
-            // This is critical on mobile (iSH) where ESC and Ctrl-C may not be
-            // available on software keyboards.
             state.quit_requested.store(true, std::sync::atomic::Ordering::Relaxed);
             return CommandResult::Handled;
         }
@@ -97,20 +92,17 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
             } else {
                 let target_ip = parts[1].to_string();
 
-                // Validate IP address before sending
                 if target_ip.parse::<std::net::IpAddr>().is_err() {
                     push_system_msg(&format!("Invalid IP address: {}", target_ip));
                 } else {
-                    // Use robust IP detection (not local_ip_address which fails on iSH)
                     let my_ip = crate::get_local_ip();
 
-                    // Build discovery payload
-                    let discovery_payload = format!(
-                        "HOPCHAT|{}|{}|{}",
-                        state.username, my_ip, state.chat_port
+                    // Signed discovery packet
+                    let discovery_payload = messaging::create_signed_discovery(
+                        &state.username, &my_ip, state.chat_port, &state.identity,
                     );
 
-                    // Build key exchange handshake payload
+                    // Key exchange handshake payload
                     let pub_x25519 = state.keypair.public_key_hex();
                     let pub_ed25519 = state.identity.public_key_hex();
                     let sig = state.identity.sign_payload(pub_x25519.as_bytes());
@@ -119,10 +111,6 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
                         state.username, pub_x25519, pub_ed25519, sig
                     );
 
-                    // [CONN-1] Determine the target chat port:
-                    // If the peer is already in the registry, use their advertised port.
-                    // Otherwise, fall back to PREFERRED_CHAT_PORT (cold connect where
-                    // we only have an IP and no prior knowledge of their port).
                     let peer_chat_port = {
                         let peers_lock = state.peers.lock().await;
                         peers_lock.values()
@@ -141,7 +129,6 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
                     let t_disc = target_discovery.clone();
                     let t_chat = target_chat.clone();
 
-                    // Send discovery + key exchange to BOTH ports
                     tokio::spawn(async move {
                         // Discovery to both ports
                         let _ = socket.send_to(disc_payload.as_bytes(), &t_disc).await;
@@ -172,4 +159,3 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
 
     CommandResult::Handled
 }
-

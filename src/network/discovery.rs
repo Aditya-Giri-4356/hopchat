@@ -3,56 +3,49 @@
 // =============================================================================
 //
 // Uses directed UDP unicast to discover peers on the LAN.
-// Each device broadcasts its username, IP, and chat port every 3 seconds.
+// Each device broadcasts a signed discovery packet every 10 seconds.
 // Discovered peers are added to a shared peer list.
 //
 // Architecture:
 //   broadcast_presence() — uses a plain tokio UDP socket (port 0) to send
-//                          discovery packets. Tries broadcast/multicast first,
-//                          falls back to directed subnet sweep for iSH/Termux.
+//                          signed discovery packets. Tries broadcast/multicast
+//                          first, falls back to directed subnet sweep.
 //   listen_for_peers()   — binds to DISCOVERY_PORT (9877) to receive broadcasts.
 //                          Falls back gracefully if bind fails (iSH).
 //
-// On iSH/Termux where socket2 fails and broadcast is unsupported,
-// discovery relies on:
-//   1. The directed subnet sweep in broadcast_presence() (sends to port 9878)
-//   2. The chat listener (port 9878) in messaging.rs echoing back discovery
+// Packet format (v2.3.0):
+//   HOPCHAT|username|ip|port|timestamp|ed25519_pub|signature
 //
-// This eliminates the socket2 dependency from the critical path.
+// Backward compatibility: listen_for_peers() also accepts the old 4-field
+// format (HOPCHAT|username|ip|port) from v2.2.0 clients.
 
 use crate::network::peer_registry::{Peer, PeerRegistry};
+use crate::network::messaging;
+use crate::user::identity::LocalIdentity;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::time::{interval, Duration, Instant};
 
 /// The UDP port used for peer discovery broadcasts.
 pub const DISCOVERY_PORT: u16 = 9877;
 
-/// Broadcasts this device's presence on the network every 3 seconds.
+/// Broadcasts this device's presence on the network every 10 seconds.
 ///
 /// Uses THREE delivery methods, each best-effort:
 ///   1. Broadcast to 255.255.255.255 (home WiFi — may fail on iSH)
 ///   2. Multicast to 239.255.255.250 (enterprise WiFi — may fail on iSH)
 ///   3. Directed subnet sweep to x.x.x.1-254 on BOTH ports (always works)
 ///
-/// The subnet sweep runs on every tick. It's the primary mechanism on iSH
-/// where broadcast/multicast are not supported.
+/// All packets are signed with the local Ed25519 identity.
 pub async fn broadcast_presence(
     username: String,
     ip: String,
     chat_port: u16,
+    identity: Arc<LocalIdentity>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Use plain tokio UDP — no socket2 dependency.
-    // Binds to port 0 (any ephemeral port). This works on every platform
-    // including iSH where socket2's Socket::new() may fail with EINVAL.
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
-
-    // Try to enable broadcast on the underlying socket (best-effort).
-    // If it fails (iSH), we still have the directed sweep.
     let _ = socket.set_broadcast(true);
-
-    let payload = format!("HOPCHAT|{}|{}|{}", username, ip, chat_port);
-    let data = payload.as_bytes();
 
     let broadcast_addr = format!("255.255.255.255:{}", DISCOVERY_PORT);
     let multicast_addr = format!("239.255.255.250:{}", DISCOVERY_PORT);
@@ -69,14 +62,16 @@ pub async fn broadcast_presence(
     loop {
         tick.tick().await;
 
-        // Method 1: Broadcast (may fail on iSH — that's fine)
+        // Generate a fresh signed packet each tick (timestamp changes)
+        let signed = messaging::create_signed_discovery(&username, &ip, chat_port, &identity);
+        let data = signed.as_bytes();
+
+        // Method 1: Broadcast
         let _ = socket.send_to(data, &broadcast_addr).await;
-        // Method 2: Multicast (may fail on iSH — that's fine)
+        // Method 2: Multicast
         let _ = socket.send_to(data, &multicast_addr).await;
 
-        // Method 3: Directed subnet sweep — THE RELIABLE FALLBACK.
-        // Sends to every IP on the subnet, targeting BOTH the discovery port
-        // (9877) and the chat port (9878).
+        // Method 3: Directed subnet sweep
         if let Some(ref prefix) = subnet_prefix {
             for i in 1..=254u8 {
                 let target = format!("{}.{}:{}", prefix, i, DISCOVERY_PORT);
@@ -90,73 +85,56 @@ pub async fn broadcast_presence(
 
 /// Listens for UDP discovery broadcasts from other peers.
 ///
-/// Parses packets matching `HOPCHAT|username|ip|port` and
-/// updates the shared peer registry.
-///
-/// If the bind to DISCOVERY_PORT fails (e.g. on iSH), this function
-/// returns an error. The chat port listener in messaging.rs is the
-/// fallback that handles discovery packets arriving on port 9878.
+/// Accepts both signed (v2.3.0+) and unsigned (v2.2.0) discovery packets.
+/// Updates the shared peer registry on valid packets.
 pub async fn listen_for_peers(
     _own_ip: String,
     own_username: String,
     registry: PeerRegistry,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Try socket2 first for port reuse, fall back to plain tokio
     let socket = match create_listener_socket_socket2() {
         Ok(s) => s,
-        Err(_) => {
-            // socket2 failed (iSH) — try plain tokio
-            UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)).await?
-        }
+        Err(_) => UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)).await?,
     };
 
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; 4096];
     loop {
         if let Ok((len, src_addr)) = socket.recv_from(&mut buf).await {
             if let Ok(text) = std::str::from_utf8(&buf[..len]) {
                 let packet_str = text.trim();
-                let parts: Vec<&str> = packet_str.split('|').collect();
 
-                // Validate packet structure: HOPCHAT|username|ip|port
-                if parts.len() == 4 && parts[0] == "HOPCHAT" {
-                    let packet_username = match sanitize_network_username(parts[1]) {
-                        Some(u) => u,
-                        None => continue,
-                    };
-                    
-                    // Trust the actual packet source, not the advertised payload IP.
-                    // This fixes the issue where iSH advertises 127.0.0.1 due to failing IP detection.
-                    let packet_ip = src_addr.ip().to_string();
-                    
-                    if let Ok(packet_port) = parts[3].parse::<u16>() {
-                        if packet_username == own_username {
-                            continue;
-                        }
+                // Use the shared parser (handles both old and new format)
+                let src_ip_str = src_addr.ip().to_string();
+                if let Some((peer_username, peer_ip, peer_port)) =
+                    messaging::parse_discovery_packet(packet_str, &src_ip_str)
+                {
+                    if peer_username == own_username {
+                        continue;
+                    }
 
-                        let mut registry_lock = registry.lock().await;
+                    let mut registry_lock = registry.lock().await;
 
-                        if registry_lock.len() >= 1000 && !registry_lock.contains_key(&packet_username) {
-                            continue;
-                        }
+                    if registry_lock.len() >= 1000 && !registry_lock.contains_key(&peer_username) {
+                        continue;
+                    }
 
-                        if let Some(existing) = registry_lock.get_mut(&packet_username) {
-                            existing.last_seen = Instant::now();
-                            existing.ip = packet_ip;
-                            existing.port = packet_port;
-                        } else {
-                            let peer = Peer {
-                                username: packet_username.clone(),
-                                ip: packet_ip.clone(),
-                                port: packet_port,
-                                hostname: None,
-                                last_seen: Instant::now(),
-                            };
-                            registry_lock.insert(packet_username.clone(), peer);
-                            drop(registry_lock);
-                            crate::network::peer_registry::resolve_hostname(
-                                registry.clone(), packet_username, packet_ip,
-                            );
-                        }
+                    if let Some(existing) = registry_lock.get_mut(&peer_username) {
+                        existing.last_seen = Instant::now();
+                        existing.ip = peer_ip;
+                        existing.port = peer_port;
+                    } else {
+                        let peer = Peer {
+                            username: peer_username.clone(),
+                            ip: peer_ip.clone(),
+                            port: peer_port,
+                            hostname: None,
+                            last_seen: Instant::now(),
+                        };
+                        registry_lock.insert(peer_username.clone(), peer);
+                        drop(registry_lock);
+                        crate::network::peer_registry::resolve_hostname(
+                            registry.clone(), peer_username, peer_ip,
+                        );
                     }
                 }
             }
@@ -165,7 +143,6 @@ pub async fn listen_for_peers(
 }
 
 /// Creates a listener socket using socket2 for port reuse support.
-/// This is an optional enhancement — if it fails, we fall back to plain tokio.
 fn create_listener_socket_socket2() -> Result<UdpSocket, std::io::Error> {
     use socket2::{Domain, Protocol, Socket, Type};
     use std::net::{Ipv4Addr, UdpSocket as StdUdpSocket};
@@ -181,7 +158,6 @@ fn create_listener_socket_socket2() -> Result<UdpSocket, std::io::Error> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     socket.bind(&addr.into())?;
 
-    // Multicast join — best-effort
     let multicast_addr = Ipv4Addr::new(239, 255, 255, 250);
     let any_addr = Ipv4Addr::UNSPECIFIED;
     let _ = socket.join_multicast_v4(&multicast_addr, &any_addr);

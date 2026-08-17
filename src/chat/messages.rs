@@ -109,9 +109,3 @@ impl ChatMessage {
     }
 }
 
-// CHANGES:
-// [SEC-1] to_packet_string: Replaced unwrap_or_default() with proper error propagation
-//         via map_err. Empty-string encryption on serialization failure is no longer possible.
-// [SEC-8] Replaced global Mutex<u64> with AtomicU64 on 64-bit targets for lock-free,
-//         panic-proof ID generation. 32-bit targets retain Mutex with poison recovery
-//         via unwrap_or_else(|e| e.into_inner()).
