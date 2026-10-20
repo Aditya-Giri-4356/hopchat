@@ -18,6 +18,7 @@ This repository contains two versions of HopChat to preserve development history
 *   **HopChat v2 (Root Directory)**: The primary, production-hardened codebase featuring persistent TOFU identity pinning, sliding-window replay protection, signed discovery broadcasts, constant-time verification, optimized Tokio runtime, low stack allocations, unified socket networking, and O(1) decryption caching.
 *   **[HopChat v1 (Legacy)](hopchat-v1/)**: The original proof-of-concept codebase. It remains accessible in the `hopchat-v1/` directory for historical reference, research, or testing.
 *   **[CHANGELOG.md](CHANGELOG.md)**: A deeply detailed technical walkthrough of all changes, optimizations, and bug fixes made between version 1.0.0 and version 2.0.0.
+*   **[TRANSPORT_PLAN.md](TRANSPORT_PLAN.md)**: Where the networking layer is headed — BLE, mesh relay, LoRa, and the rest of the transport work.
 
 ---
 
@@ -224,9 +225,11 @@ This performs a safety verification check against `Cargo.toml`, requests interac
 
 ## Roadmap
 
-- **Hybrid Bluetooth Low Energy (BLE) Transport**: We plan to implement concurrent BLE and UDP P2P networking using the `blew` crate. This will allow true zero-net connectivity by acting as both a BLE Central and Peripheral, leveraging opportunistic L2CAP CoC for high-speed socket-like P2P communication when WiFi is entirely absent.
-- **File Transfers**: Base64 binary chunking to allow for direct encrypted file transfer over UDP and BLE. 
-- **Mesh Relay**: Decentralized packet hopping. If A can see B, and B can see C, A can message C purely through the HOPCHAT physical geometry.
+HOPCHAT currently speaks UDP over whatever IP network it happens to be attached to. The next big step is decoupling that: one small binary envelope, and a transport layer that can carry it over Bluetooth LE, Wi-Fi Direct, LoRa, or even sound when the network isn't there.
+
+That plan got long enough to deserve its own page. **→ [TRANSPORT_PLAN.md](TRANSPORT_PLAN.md)**
+
+Short version of what's coming: BLE as a first-class transport (GATT for compatibility, L2CAP CoC for speed), a mesh relay layer so A can reach C through B, a LoRa bridge via cheap Meshtastic radios for kilometre-range hops, and file transfer once the envelope is binary rather than hex.
 
 ---
 
