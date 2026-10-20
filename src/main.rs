@@ -175,11 +175,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // UDP discovery: broadcast our signed presence
     {
         let u = username.clone();
-        let ip = local_ip.clone();
         let id = local_identity.clone();
         let p = chat_port;
         tokio::spawn(async move {
-            if let Err(e) = discovery::broadcast_presence(u, ip, p, id).await {
+            if let Err(e) = discovery::broadcast_presence(u, p, id).await {
                 eprintln!("[hopchat] broadcast_presence stopped: {}", e);
             }
         });
@@ -187,11 +186,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // UDP discovery: listen for peers (binds to port 9877)
     {
-        let ip = local_ip.clone();
         let u = username.clone();
         let p = peers.clone();
         tokio::spawn(async move {
-            if let Err(e) = discovery::listen_for_peers(ip, u, p).await {
+            if let Err(e) = discovery::listen_for_peers(u, p).await {
                 eprintln!("[hopchat] listen_for_peers stopped: {} — chat port listener still active", e);
             }
         });
@@ -248,12 +246,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Spawns an async task that scans the local subnet by sending signed
 /// discovery and key exchange packets to all 254 host IPs.
 fn spawn_subnet_scan(state: &AppState) {
-    let parts: Vec<&str> = state.scanner.local_ip.split('.').collect();
-    if parts.len() != 4 {
+    let Some(prefix) = discovery::subnet_prefix(&state.scanner.local_ip) else {
         return;
-    }
-
-    let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+    };
     let socket = state.outbound_socket.clone();
 
     // Signed discovery packet
@@ -274,11 +269,13 @@ fn spawn_subnet_scan(state: &AppState) {
     );
 
     let disc_port = discovery::DISCOVERY_PORT;
-    let chat_port = crate::PREFERRED_CHAT_PORT;
+    // Our own advertised port — a peer that had to fall back to a dynamic port
+    // is only reachable if we sweep the port it is actually listening on.
+    let chat_port = state.chat_port;
 
     tokio::spawn(async move {
-        for i in 1..=254u8 {
-            let target_ip = format!("{}.{}", prefix, i);
+        for host in 1..=254u8 {
+            let target_ip = format!("{}.{}", prefix, host);
             let target_disc = format!("{}:{}", target_ip, disc_port);
             let target_chat = format!("{}:{}", target_ip, chat_port);
 
@@ -286,22 +283,53 @@ fn spawn_subnet_scan(state: &AppState) {
             let _ = socket.send_to(discovery_payload.as_bytes(), &target_chat).await;
             let _ = socket.send_to(key_payload.as_bytes(), &target_disc).await;
             let _ = socket.send_to(key_payload.as_bytes(), &target_chat).await;
+
+            // Pace the burst so receivers can drain their socket buffers.
+            if host % 8 == 0 {
+                tokio::time::sleep(Duration::from_millis(4)).await;
+            }
         }
     });
 }
 
-/// Returns the device's local IP address robustly by querying the OS routing table.
+/// Returns the device's LAN IPv4 address.
+///
+/// The routing-table probe needs a default route, which an isolated hotspot or
+/// an ad-hoc network does not have. When it fails, fall back to enumerating
+/// interfaces and preferring a private address over a link-local one — a
+/// 169.254/16 address means DHCP never completed, not that we have a LAN.
 pub fn get_local_ip() -> String {
+    use std::net::IpAddr;
+
     if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        // connect() on UDP only selects a route and source address. Nothing is
+        // transmitted, so this works with no internet access.
         if socket.connect("8.8.8.8:80").is_ok() {
             if let Ok(addr) = socket.local_addr() {
-                return addr.ip().to_string();
+                if let IpAddr::V4(v4) = addr.ip() {
+                    if !v4.is_loopback() && !v4.is_unspecified() {
+                        return v4.to_string();
+                    }
+                }
             }
         }
     }
-    local_ip_address::local_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|_| "127.0.0.1".to_string())
+
+    let candidates: Vec<std::net::Ipv4Addr> = local_ip_address::list_afinet_netifas()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(_, ip)| match ip {
+            IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => Some(v4),
+            _ => None,
+        })
+        .collect();
+
+    candidates
+        .iter()
+        .find(|v4| v4.is_private())
+        .or_else(|| candidates.iter().find(|v4| !v4.is_link_local()))
+        .map(|v4| v4.to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 /// The main event loop that handles UI rendering, input, and outgoing messages.
