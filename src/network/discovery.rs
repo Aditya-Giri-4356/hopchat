@@ -19,13 +19,13 @@
 // Backward compatibility: listen_for_peers() also accepts the old 4-field
 // format (HOPCHAT|username|ip|port) from v2.2.0 clients.
 
-use crate::network::peer_registry::{Peer, PeerRegistry};
+use crate::network::peer_registry::{resolve_hostname, upsert_peer, PeerRegistry, Upsert};
 use crate::network::messaging;
 use crate::user::identity::LocalIdentity;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::time::{interval, Duration, Instant};
+use tokio::time::{interval, Duration};
 
 /// The UDP port used for peer discovery broadcasts.
 pub const DISCOVERY_PORT: u16 = 9877;
@@ -40,7 +40,6 @@ pub const DISCOVERY_PORT: u16 = 9877;
 /// All packets are signed with the local Ed25519 identity.
 pub async fn broadcast_presence(
     username: String,
-    ip: String,
     chat_port: u16,
     identity: Arc<LocalIdentity>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -50,17 +49,30 @@ pub async fn broadcast_presence(
     let broadcast_addr = format!("255.255.255.255:{}", DISCOVERY_PORT);
     let multicast_addr = format!("239.255.255.250:{}", DISCOVERY_PORT);
 
-    // Compute the subnet prefix for directed sweep
-    let parts: Vec<&str> = ip.split('.').collect();
-    let subnet_prefix = if parts.len() == 4 {
-        Some(format!("{}.{}.{}", parts[0], parts[1], parts[2]))
-    } else {
-        None
-    };
+    // A full sweep is 508 packets. Sending it every tick flooded the LAN,
+    // saturated the receivers' socket buffers and tripped their rate limiters,
+    // so it runs once a minute while the cheap two-packet announcements stay on
+    // the ten second cadence.
+    const SWEEP_EVERY_TICKS: u32 = 6;
+    let mut ticks: u32 = 0;
+    let mut warned = false;
 
     let mut tick = interval(Duration::from_secs(10));
     loop {
         tick.tick().await;
+
+        // Re-read the address every tick. A laptop that roams to another
+        // network would otherwise keep announcing — and sweeping — its old
+        // subnet for as long as it runs.
+        let ip = crate::get_local_ip();
+        let subnet = subnet_prefix(&ip);
+        if subnet.is_none() && !warned {
+            warned = true;
+            eprintln!(
+                "[hopchat] no IPv4 LAN address ({}); relying on broadcast and multicast only",
+                ip
+            );
+        }
 
         // Generate a fresh signed packet each tick (timestamp changes)
         let signed = messaging::create_signed_discovery(&username, &ip, chat_port, &identity);
@@ -72,13 +84,40 @@ pub async fn broadcast_presence(
         let _ = socket.send_to(data, &multicast_addr).await;
 
         // Method 3: Directed subnet sweep
-        if let Some(ref prefix) = subnet_prefix {
-            for i in 1..=254u8 {
-                let target = format!("{}.{}:{}", prefix, i, DISCOVERY_PORT);
-                let _ = socket.send_to(data, &target).await;
-                let target_chat = format!("{}.{}:{}", prefix, i, crate::PREFERRED_CHAT_PORT);
-                let _ = socket.send_to(data, &target_chat).await;
+        ticks = ticks.wrapping_add(1);
+        if let Some(ref prefix) = subnet {
+            if ticks % SWEEP_EVERY_TICKS == 0 {
+                sweep(&socket, prefix, data, chat_port).await;
             }
+        }
+    }
+}
+
+/// The first three octets of an IPv4 address, or None for anything else.
+///
+/// The directed sweep assumes a /24. That is the overwhelmingly common LAN
+/// shape; on a wider net the sweep still covers the sender's own /24.
+pub fn subnet_prefix(ip: &str) -> Option<String> {
+    let octets: Vec<&str> = ip.split('.').collect();
+    if octets.len() == 4 {
+        Some(format!("{}.{}.{}", octets[0], octets[1], octets[2]))
+    } else {
+        None
+    }
+}
+
+/// Sends `data` to every host in the /24 on both the discovery and chat ports.
+///
+/// Paced in small batches: a 500-packet burst overruns the receiver's socket
+/// buffer and most of it is dropped before it can be read.
+async fn sweep(socket: &UdpSocket, prefix: &str, data: &[u8], chat_port: u16) {
+    for host in 1..=254u8 {
+        for port in [DISCOVERY_PORT, chat_port] {
+            let target = format!("{}.{}:{}", prefix, host, port);
+            let _ = socket.send_to(data, &target).await;
+        }
+        if host % 8 == 0 {
+            tokio::time::sleep(Duration::from_millis(4)).await;
         }
     }
 }
@@ -88,7 +127,6 @@ pub async fn broadcast_presence(
 /// Accepts both signed (v2.3.0+) and unsigned (v2.2.0) discovery packets.
 /// Updates the shared peer registry on valid packets.
 pub async fn listen_for_peers(
-    _own_ip: String,
     own_username: String,
     registry: PeerRegistry,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -105,36 +143,24 @@ pub async fn listen_for_peers(
 
                 // Use the shared parser (handles both old and new format)
                 let src_ip_str = src_addr.ip().to_string();
-                if let Some((peer_username, peer_ip, peer_port)) =
-                    messaging::parse_discovery_packet(packet_str, &src_ip_str)
-                {
-                    if peer_username == own_username {
+                if let Some(disc) = messaging::parse_discovery_packet(packet_str, &src_ip_str) {
+                    if disc.username == own_username {
                         continue;
                     }
 
-                    let mut registry_lock = registry.lock().await;
+                    let outcome = {
+                        let mut reg = registry.lock().await;
+                        upsert_peer(
+                            &mut reg,
+                            &disc.username,
+                            &disc.ip,
+                            disc.port,
+                            disc.authenticated,
+                        )
+                    };
 
-                    if registry_lock.len() >= 1000 && !registry_lock.contains_key(&peer_username) {
-                        continue;
-                    }
-
-                    if let Some(existing) = registry_lock.get_mut(&peer_username) {
-                        existing.last_seen = Instant::now();
-                        existing.ip = peer_ip;
-                        existing.port = peer_port;
-                    } else {
-                        let peer = Peer {
-                            username: peer_username.clone(),
-                            ip: peer_ip.clone(),
-                            port: peer_port,
-                            hostname: None,
-                            last_seen: Instant::now(),
-                        };
-                        registry_lock.insert(peer_username.clone(), peer);
-                        drop(registry_lock);
-                        crate::network::peer_registry::resolve_hostname(
-                            registry.clone(), peer_username, peer_ip,
-                        );
+                    if outcome == Upsert::Inserted {
+                        resolve_hostname(registry.clone(), disc.username, disc.ip);
                     }
                 }
             }

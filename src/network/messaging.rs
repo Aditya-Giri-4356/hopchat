@@ -10,7 +10,7 @@
 
 use crate::chat::messages::ChatMessage;
 use crate::crypto::key_exchange::X25519KeyPair;
-use crate::network::peer_registry::{Peer, PeerRegistry};
+use crate::network::peer_registry::{upsert_peer, Peer, PeerRegistry, Upsert};
 use crate::network::discovery::sanitize_network_username;
 use crate::user::identity::LocalIdentity;
 use crate::user::trust_db::TrustDb;
@@ -26,8 +26,11 @@ use tokio::time::timeout;
 /// VecDeque gives O(1) pop_front for history pruning (vs Vec's O(N) remove(0)).
 pub type ChatHistory = Arc<Mutex<HashMap<String, VecDeque<ChatMessage>>>>;
 
-/// Maps message IDs to their ACK notifier channels.
-pub type AckRegistry = Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>>;
+/// Maps message IDs to the address we expect the ACK from, plus its notifier.
+///
+/// Binding the address matters: without it any host on the LAN can satisfy a
+/// pending send with a forged ACK and make an undelivered message look delivered.
+pub type AckRegistry = Arc<Mutex<HashMap<u64, (SocketAddr, oneshot::Sender<()>)>>>;
 
 /// Per-peer session state: symmetric key + replay protection window.
 pub struct PeerSession {
@@ -170,7 +173,7 @@ pub async fn send_message_with_retry(
         {
             let mut reg = ack_registry.lock().await;
             reg.remove(&message.id);
-            reg.insert(message.id, tx);
+            reg.insert(message.id, (peer_addr, tx));
         }
 
         if let Err(e) = send_raw_packet(&socket, peer_addr, &packet_str).await {
@@ -227,48 +230,66 @@ pub fn create_signed_discovery(
     format!("{}|{}|{}", payload, ed_pub, sig)
 }
 
-/// Parses and optionally verifies a discovery packet. Accepts both:
-/// - Old format (4 fields): HOPCHAT|username|ip|port (no verification)
+/// A discovery announcement that passed parsing.
+pub struct Discovery {
+    /// Sanitized peer username.
+    pub username: String,
+    /// Source address the packet actually arrived from, never the claimed one.
+    pub ip: String,
+    /// The peer's chat port, as advertised.
+    pub port: u16,
+    /// False for legacy 4-field packets, which carry no signature.
+    pub authenticated: bool,
+}
+
+/// Parses and verifies a discovery packet. Accepts both:
 /// - New format (7 fields): HOPCHAT|username|ip|port|timestamp|ed25519_pub|sig
+/// - Old format (4 fields): HOPCHAT|username|ip|port — flagged unauthenticated
 ///
-/// Returns (username, source_ip, port) on success.
-pub fn parse_discovery_packet(
-    packet_str: &str,
-    src_ip: &str,
-) -> Option<(String, String, u16)> {
+/// The claimed IP inside the packet is deliberately ignored: callers get the
+/// source address, which a sender cannot forge.
+pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discovery> {
     let parts: Vec<&str> = packet_str.split('|').collect();
 
-    if parts.len() == 7 && parts[0] == "HOPCHAT" {
-        // New signed format
-        let username = sanitize_network_username(parts[1])?;
-        let port: u16 = parts[3].parse().ok()?;
-        let timestamp: u64 = parts[4].parse().ok()?;
-        let ed25519_pub = parts[5];
-        let sig_hex = parts[6];
+    let (username, port, authenticated) = match parts.len() {
+        7 if parts[0] == "HOPCHAT" => {
+            let timestamp: u64 = parts[4].parse().ok()?;
 
-        // Reject packets older than 30 seconds (replay protection)
-        let now = unix_timestamp();
-        let age = if now >= timestamp { now - timestamp } else { timestamp - now };
-        if age > 30 {
-            return None;
+            // Replay protection: 30 second freshness window.
+            if unix_timestamp().abs_diff(timestamp) > 30 {
+                return None;
+            }
+
+            // The signature covers the unsigned portion including the port.
+            let payload = format!("HOPCHAT|{}|{}|{}|{}", parts[1], parts[2], parts[3], parts[4]);
+            if !LocalIdentity::verify_signature(parts[5], payload.as_bytes(), parts[6]) {
+                return None;
+            }
+
+            (
+                sanitize_network_username(parts[1])?,
+                parts[3].parse().ok()?,
+                true,
+            )
         }
-
-        // Verify signature over the unsigned portion
-        let payload = format!("HOPCHAT|{}|{}|{}|{}", parts[1], parts[2], parts[3], parts[4]);
-        if !LocalIdentity::verify_signature(ed25519_pub, payload.as_bytes(), sig_hex) {
-            return None;
+        4 if parts[0] == "HOPCHAT" => {
+            // Unsigned legacy format, kept for interoperability with v2.2.0.
+            // Callers must not let these displace a peer they already know.
+            (
+                sanitize_network_username(parts[1])?,
+                parts[3].parse().ok()?,
+                false,
+            )
         }
+        _ => return None,
+    };
 
-        // Trust source IP, not payload IP
-        Some((username, src_ip.to_string(), port))
-    } else if parts.len() == 4 && parts[0] == "HOPCHAT" {
-        // Legacy unsigned format — accept for backward compatibility
-        let username = sanitize_network_username(parts[1])?;
-        let port: u16 = parts[3].parse().ok()?;
-        Some((username, src_ip.to_string(), port))
-    } else {
-        None
-    }
+    Some(Discovery {
+        username,
+        ip: src_ip.to_string(),
+        port,
+        authenticated,
+    })
 }
 
 // =============================================================================
@@ -302,7 +323,10 @@ pub async fn listen_for_messages(
     let our_ip = crate::get_local_ip();
     let our_chat_port = socket.local_addr().map(|a| a.port()).unwrap_or(crate::PREFERRED_CHAT_PORT);
 
-    let mut buf = [0u8; 4096];
+    // Large enough for the longest legal packet (a max-size HOPCHAT_MSG is a
+    // little over 8 KiB of hex). A shorter buffer silently truncates datagrams
+    // and the message then fails to decrypt with no diagnostic.
+    let mut buf = [0u8; 16 * 1024];
     loop {
         if let Ok((len, src_addr)) = socket.recv_from(&mut buf).await {
             let now = Instant::now();
@@ -331,70 +355,81 @@ pub async fn listen_for_messages(
                 // ==========================================================
                 if packet_str.starts_with("HOPCHAT|") && !packet_str.starts_with("HOPCHAT_") {
                     let src_ip_str = src_addr.ip().to_string();
-                    if let Some((peer_username, peer_ip, peer_port)) =
-                        parse_discovery_packet(packet_str, &src_ip_str)
-                    {
-                        if peer_username != our_username {
-                            // Register/update peer
-                            {
-                                let mut reg = peer_registry.lock().await;
-                                if reg.len() >= 1000 && !reg.contains_key(&peer_username) {
-                                    continue;
-                                }
-                                let is_new = !reg.contains_key(&peer_username);
-                                if let Some(existing) = reg.get_mut(&peer_username) {
-                                    existing.last_seen = tokio::time::Instant::now();
-                                    existing.ip = peer_ip.clone();
-                                    existing.port = peer_port;
-                                } else {
-                                    reg.insert(peer_username.clone(), Peer {
-                                        username: peer_username.clone(),
-                                        ip: peer_ip.clone(),
-                                        port: peer_port,
-                                        hostname: None,
-                                        last_seen: tokio::time::Instant::now(),
-                                    });
-                                }
-                                drop(reg);
-                                if is_new {
-                                    crate::network::peer_registry::resolve_hostname(
-                                        peer_registry.clone(), peer_username.clone(), peer_ip.clone(),
-                                    );
-                                }
-                            }
+                    if let Some(disc) = parse_discovery_packet(packet_str, &src_ip_str) {
+                        if disc.username == our_username {
+                            continue;
+                        }
 
-                            // Echo back our signed discovery + key exchange
-                            {
-                                let echo = create_signed_discovery(
-                                    &our_username, &our_ip, our_chat_port, &local_identity,
-                                );
-                                let _ = socket.send_to(echo.as_bytes(), &src_addr).await;
-                                let peer_chat = format!("{}:{}", peer_ip, crate::PREFERRED_CHAT_PORT);
-                                let _ = socket.send_to(echo.as_bytes(), &peer_chat).await;
+                        let outcome = {
+                            let mut reg = peer_registry.lock().await;
+                            upsert_peer(
+                                &mut reg,
+                                &disc.username,
+                                &disc.ip,
+                                disc.port,
+                                disc.authenticated,
+                            )
+                        };
 
-                                // Key exchange
-                                let pub_x25519 = local_keypair.public_key_hex();
-                                let pub_ed25519 = local_identity.public_key_hex();
-                                let sig = local_identity.sign_payload(pub_x25519.as_bytes());
-                                let key_payload = format!(
-                                    "HOPCHAT_KEY|{}|{}|{}|{}",
-                                    our_username, pub_x25519, pub_ed25519, sig
-                                );
-                                let _ = socket.send_to(key_payload.as_bytes(), &src_addr).await;
-                                let _ = socket.send_to(key_payload.as_bytes(), &peer_chat).await;
+                        if outcome == Upsert::Rejected {
+                            continue;
+                        }
+                        if outcome == Upsert::Inserted {
+                            crate::network::peer_registry::resolve_hostname(
+                                peer_registry.clone(),
+                                disc.username.clone(),
+                                disc.ip.clone(),
+                            );
+                        }
+
+                        // Reply at most once per peer: on first contact, or when
+                        // we still have no session with them. Echoing every
+                        // announcement back makes two nodes ping-pong forever.
+                        let have_session = peer_keys.lock().await.contains_key(&disc.username);
+                        if outcome == Upsert::Updated && have_session {
+                            continue;
+                        }
+
+                        let echo = create_signed_discovery(
+                            &our_username,
+                            &our_ip,
+                            our_chat_port,
+                            &local_identity,
+                        );
+                        let pub_x25519 = local_keypair.public_key_hex();
+                        let sig = local_identity.sign_payload(pub_x25519.as_bytes());
+                        let key_payload = format!(
+                            "HOPCHAT_KEY|{}|{}|{}|{}",
+                            our_username,
+                            pub_x25519,
+                            local_identity.public_key_hex(),
+                            sig
+                        );
+
+                        // Answer on the socket the packet came from and, when it
+                        // differs, on the peer's advertised chat port.
+                        let mut targets = Vec::with_capacity(2);
+                        targets.push(src_addr);
+                        if let Ok(chat_addr) = format!("{}:{}", disc.ip, disc.port).parse::<SocketAddr>() {
+                            if chat_addr != src_addr {
+                                targets.push(chat_addr);
                             }
+                        }
+                        for target in targets {
+                            let _ = socket.send_to(echo.as_bytes(), &target).await;
+                            let _ = socket.send_to(key_payload.as_bytes(), &target).await;
                         }
                     }
 
                 // ==========================================================
                 // HOPCHAT_ACK
                 // ==========================================================
-                } else if packet_str.starts_with("HOPCHAT_ACK|") {
-                    let parts: Vec<&str> = packet_str.split('|').collect();
-                    if parts.len() == 2 {
-                        if let Ok(ack_id) = parts[1].parse::<u64>() {
-                            let mut reg = ack_registry.lock().await;
-                            if let Some(tx) = reg.remove(&ack_id) {
+                } else if let Some(ack_id) = packet_str.strip_prefix("HOPCHAT_ACK|") {
+                    if let Ok(ack_id) = ack_id.parse::<u64>() {
+                        let mut reg = ack_registry.lock().await;
+                        // Only the host we actually sent to may complete the send.
+                        if let Some((expected, tx)) = reg.remove(&ack_id) {
+                            if expected.ip() == ip {
                                 let _ = tx.send(());
                             }
                         }
@@ -415,7 +450,21 @@ pub async fn listen_for_messages(
                         let sender_signature = parts[4];
 
                         if sender_username != our_username {
-                            // TOFU check via persistent trust database
+                            // Verify the signature first. Pinning a key from an
+                            // unauthenticated packet would let anyone squat a
+                            // username and lock the real owner out of the DB.
+                            if !LocalIdentity::verify_signature(
+                                sender_ed25519_hex,
+                                sender_x25519_hex.as_bytes(),
+                                sender_signature,
+                            ) {
+                                eprintln!(
+                                    "[SECURITY] Rejected invalid Ed25519 signature from {}",
+                                    src_addr
+                                );
+                                continue;
+                            }
+
                             {
                                 let mut db = trust_db.lock().await;
                                 if !db.verify_or_pin(&sender_username, sender_ed25519_hex) {
@@ -423,67 +472,77 @@ pub async fn listen_for_messages(
                                 }
                             }
 
-                            // Verify Ed25519 signature over the X25519 public key
-                            if LocalIdentity::verify_signature(
-                                sender_ed25519_hex,
-                                sender_x25519_hex.as_bytes(),
-                                sender_signature,
-                            ) {
-                                if let Ok(derived_key) = local_keypair.derive_session_key(sender_x25519_hex) {
-                                    let mut keys_lock = peer_keys.lock().await;
-                                    let already_had_key = keys_lock.contains_key(&sender_username);
+                            if let Ok(derived_key) = local_keypair.derive_session_key(sender_x25519_hex) {
+                                let mut keys_lock = peer_keys.lock().await;
+                                let already_had_key = keys_lock.contains_key(&sender_username);
+
+                                // A duplicated or replayed KEY derives the same
+                                // session key. Rebuilding the session would
+                                // reset the replay window and re-open messages
+                                // already delivered, so only replace it when
+                                // the key actually changes.
+                                let unchanged = keys_lock
+                                    .get(&sender_username)
+                                    .map_or(false, |s| s.key == derived_key);
+                                if !unchanged {
                                     keys_lock.insert(sender_username.clone(), PeerSession {
                                         key: derived_key,
                                         replay: ReplayWindow::new(),
                                     });
+                                }
 
-                                    // Update IP cache
-                                    if !ip_to_username.contains_key(&ip) {
-                                        while ip_cache_order.len() >= IP_CACHE_CAP {
-                                            if let Some(evict) = ip_cache_order.pop_front() {
-                                                ip_to_username.remove(&evict);
-                                            }
+                                // Update IP cache
+                                if !ip_to_username.contains_key(&ip) {
+                                    while ip_cache_order.len() >= IP_CACHE_CAP {
+                                        if let Some(evict) = ip_cache_order.pop_front() {
+                                            ip_to_username.remove(&evict);
                                         }
-                                        ip_cache_order.push_back(ip);
                                     }
-                                    ip_to_username.insert(ip, sender_username.clone());
+                                    ip_cache_order.push_back(ip);
+                                }
+                                ip_to_username.insert(ip, sender_username.clone());
 
-                                    drop(keys_lock);
+                                drop(keys_lock);
 
-                                    // Register peer
-                                    {
-                                        let mut reg = peer_registry.lock().await;
-                                        let is_new = !reg.contains_key(&sender_username);
-                                        let peer_ip = src_addr.ip().to_string();
+                                // Register peer, keeping the chat port we may
+                                // already have learned from discovery. A key
+                                // packet arrives from the peer's own socket,
+                                // so its source port is a sound default.
+                                {
+                                    let mut reg = peer_registry.lock().await;
+                                    let is_new = !reg.contains_key(&sender_username);
+                                    let peer_ip = src_addr.ip().to_string();
+                                    if let Some(existing) = reg.get_mut(&sender_username) {
+                                        existing.ip = peer_ip.clone();
+                                        existing.last_seen = tokio::time::Instant::now();
+                                    } else {
                                         reg.insert(sender_username.clone(), Peer {
                                             username: sender_username.clone(),
                                             ip: peer_ip.clone(),
-                                            port: crate::PREFERRED_CHAT_PORT,
+                                            port: src_addr.port(),
                                             hostname: None,
                                             last_seen: tokio::time::Instant::now(),
                                         });
-                                        drop(reg);
-                                        if is_new {
-                                            crate::network::peer_registry::resolve_hostname(
-                                                peer_registry.clone(), sender_username.clone(), peer_ip,
-                                            );
-                                        }
                                     }
-
-                                    // Send our key back to complete the handshake
-                                    if !already_had_key {
-                                        let pub_x25519 = local_keypair.public_key_hex();
-                                        let pub_ed25519 = local_identity.public_key_hex();
-                                        let sig = local_identity.sign_payload(pub_x25519.as_bytes());
-                                        let handshake = format!(
-                                            "HOPCHAT_KEY|{}|{}|{}|{}",
-                                            our_username, pub_x25519, pub_ed25519, sig
+                                    drop(reg);
+                                    if is_new {
+                                        crate::network::peer_registry::resolve_hostname(
+                                            peer_registry.clone(), sender_username.clone(), peer_ip,
                                         );
-                                        let _ = socket.send_to(handshake.as_bytes(), &src_addr).await;
                                     }
                                 }
-                            } else {
-                                eprintln!("[SECURITY] Rejected invalid Ed25519 signature from {}", src_addr);
+
+                                // Send our key back to complete the handshake
+                                if !already_had_key {
+                                    let pub_x25519 = local_keypair.public_key_hex();
+                                    let pub_ed25519 = local_identity.public_key_hex();
+                                    let sig = local_identity.sign_payload(pub_x25519.as_bytes());
+                                    let handshake = format!(
+                                        "HOPCHAT_KEY|{}|{}|{}|{}",
+                                        our_username, pub_x25519, pub_ed25519, sig
+                                    );
+                                    let _ = socket.send_to(handshake.as_bytes(), &src_addr).await;
+                                }
                             }
                         }
                     }
