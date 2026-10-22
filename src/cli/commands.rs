@@ -60,24 +60,35 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
         "/help" => {
             push_system_msg(
                 "Commands:\n\
-                /help         - Show this menu\n\
-                /scan         - Open the Interactive Subnet Scanner\n\
-                /connect <ip> - Manually connect to an IP (Bypasses discovery)\n\
-                /peers        - List all discovered peers and their IPs\n\
+                /nearby       - Open the Nearby window (who is around you)\n\
+                /peers        - List everyone on this network and their status\n\
+                /connect <ip> - Rarely needed: peers connect on their own\n\
                 /quit         - Exit HopChat"
             );
         }
-        "/scan" => {
+        "/nearby" | "/scan" => {
             return CommandResult::TriggerScan;
         }
         "/peers" => {
             let peers_lock = state.peers.lock().await;
             if peers_lock.is_empty() {
-                push_system_msg("No peers discovered yet.");
+                push_system_msg(
+                    "Nobody else found yet. You need to be on the same Wi-Fi or hotspot, \
+                     and they need to be running HopChat.",
+                );
             } else {
-                let mut peer_list = String::from("Discovered Peers:\n");
-                for peer in peers_lock.values() {
-                    peer_list.push_str(&format!("- {} ({} : {})\n", peer.username, peer.ip, peer.port));
+                let mut found: Vec<_> = peers_lock.values().collect();
+                found.sort_by(|a, b| a.username.cmp(&b.username));
+                let mut peer_list = String::from("Nearby:\n");
+                for peer in found {
+                    let label = if peer.connected {
+                        "connected"
+                    } else if peer.online {
+                        "connecting"
+                    } else {
+                        "offline"
+                    };
+                    peer_list.push_str(&format!("- {} [{}] {}\n", peer.username, label, peer.ip));
                 }
                 push_system_msg(peer_list.trim_end());
             }
