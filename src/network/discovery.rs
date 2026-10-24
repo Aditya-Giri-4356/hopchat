@@ -19,8 +19,7 @@
 // Backward compatibility: listen_for_peers() also accepts the old 4-field
 // format (HOPCHAT|username|ip|port) from v2.2.0 clients.
 
-use crate::network::peer_registry::{resolve_hostname, upsert_peer, PeerRegistry, Upsert};
-use crate::network::messaging;
+use crate::network::messaging::{self, DiscoveryCtx};
 use crate::user::identity::LocalIdentity;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -51,12 +50,14 @@ pub async fn broadcast_presence(
 
     // A full sweep is 508 packets. Sending it every tick flooded the LAN,
     // saturated the receivers' socket buffers and tripped their rate limiters,
-    // so it runs once a minute while the cheap two-packet announcements stay on
-    // the ten second cadence.
-    const SWEEP_EVERY_TICKS: u32 = 6;
+    // so it runs every thirty seconds while the cheap two-packet announcements
+    // stay on the ten second cadence.
+    const SWEEP_EVERY_TICKS: u32 = 3;
     let mut ticks: u32 = 0;
     let mut warned = false;
 
+    // tokio's interval completes its first tick immediately, so counting from
+    // one means the first sweep runs at startup rather than thirty seconds in.
     let mut tick = interval(Duration::from_secs(10));
     loop {
         tick.tick().await;
@@ -86,7 +87,7 @@ pub async fn broadcast_presence(
         // Method 3: Directed subnet sweep
         ticks = ticks.wrapping_add(1);
         if let Some(ref prefix) = subnet {
-            if ticks % SWEEP_EVERY_TICKS == 0 {
+            if ticks % SWEEP_EVERY_TICKS == 1 {
                 sweep(&socket, prefix, data, chat_port).await;
             }
         }
@@ -122,13 +123,13 @@ async fn sweep(socket: &UdpSocket, prefix: &str, data: &[u8], chat_port: u16) {
     }
 }
 
-/// Listens for UDP discovery broadcasts from other peers.
+/// Listens for UDP discovery broadcasts on the discovery port.
 ///
-/// Accepts both signed (v2.3.0+) and unsigned (v2.2.0) discovery packets.
-/// Updates the shared peer registry on valid packets.
+/// Broadcast and multicast announcements only ever arrive here, never on the
+/// chat port, so this is the listener that has to start handshakes. It shares
+/// `handle_discovery` with the chat-port listener for exactly that reason.
 pub async fn listen_for_peers(
-    own_username: String,
-    registry: PeerRegistry,
+    ctx: Arc<DiscoveryCtx>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let socket = match create_listener_socket_socket2() {
         Ok(s) => s,
@@ -139,30 +140,7 @@ pub async fn listen_for_peers(
     loop {
         if let Ok((len, src_addr)) = socket.recv_from(&mut buf).await {
             if let Ok(text) = std::str::from_utf8(&buf[..len]) {
-                let packet_str = text.trim();
-
-                // Use the shared parser (handles both old and new format)
-                let src_ip_str = src_addr.ip().to_string();
-                if let Some(disc) = messaging::parse_discovery_packet(packet_str, &src_ip_str) {
-                    if disc.username == own_username {
-                        continue;
-                    }
-
-                    let outcome = {
-                        let mut reg = registry.lock().await;
-                        upsert_peer(
-                            &mut reg,
-                            &disc.username,
-                            &disc.ip,
-                            disc.port,
-                            disc.authenticated,
-                        )
-                    };
-
-                    if outcome == Upsert::Inserted {
-                        resolve_hostname(registry.clone(), disc.username, disc.ip);
-                    }
-                }
+                messaging::handle_discovery(text.trim(), src_addr, &ctx).await;
             }
         }
     }

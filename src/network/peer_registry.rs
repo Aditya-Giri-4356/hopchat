@@ -21,8 +21,14 @@ pub struct Peer {
     pub port: u16,
     /// The device hostname if resolved
     pub hostname: Option<String>,
-    /// The last time a discovery packet was received from this peer
+    /// The last time any valid packet was received from this peer
     pub last_seen: Instant,
+    /// False once the peer has been silent for `OFFLINE_AFTER`. The entry is
+    /// kept so the friend list does not lose people when a single broadcast
+    /// is dropped, which on a phone hotspot is most of them.
+    pub online: bool,
+    /// True once a session key has been negotiated with this peer.
+    pub connected: bool,
 }
 
 impl Peer {
@@ -37,6 +43,14 @@ pub type PeerRegistry = Arc<Mutex<HashMap<String, Peer>>>;
 
 /// Upper bound on tracked peers, so a hostile LAN cannot exhaust memory.
 pub const MAX_PEERS: usize = 1000;
+
+/// How long a peer may stay silent before it is shown as offline.
+///
+/// Announcements go out every ten seconds, so this tolerates a dozen misses.
+/// The earlier behaviour deleted the peer after 60 seconds, which made anyone
+/// on a lossy link flicker out of the friend list while still sitting on the
+/// same network.
+pub const OFFLINE_AFTER: Duration = Duration::from_secs(120);
 
 /// Outcome of registering a peer announced by a discovery packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,59 +76,99 @@ pub fn upsert_peer(
     port: u16,
     authenticated: bool,
 ) -> Upsert {
-    if let Some(existing) = registry.get_mut(username) {
+    if registry.contains_key(username) {
+        // An unsigned packet may introduce a new name but never redirect one
+        // we already track, so anyone can claim a username that is not yet
+        // in use but nobody can take over an established one.
         if !authenticated {
             return Upsert::Rejected;
         }
-        existing.ip = ip.to_string();
-        existing.port = port;
-        existing.last_seen = Instant::now();
-        Upsert::Updated
-    } else if registry.len() >= MAX_PEERS {
-        Upsert::Rejected
-    } else {
-        registry.insert(
-            username.to_string(),
-            Peer {
-                username: username.to_string(),
-                ip: ip.to_string(),
-                port,
-                hostname: None,
-                last_seen: Instant::now(),
-            },
-        );
-        Upsert::Inserted
+        if let Some(existing) = registry.get_mut(username) {
+            existing.ip = ip.to_string();
+            existing.port = port;
+            existing.last_seen = Instant::now();
+            existing.online = true;
+        }
+        return Upsert::Updated;
+    }
+
+    // Make room by dropping the longest-silent offline peer. Entries are
+    // otherwise kept for the whole session, so without this the cap would
+    // permanently block anyone new once it filled up.
+    if registry.len() >= MAX_PEERS {
+        let victim = registry
+            .iter()
+            .filter(|(_, p)| !p.online)
+            .min_by_key(|(_, p)| p.last_seen)
+            .map(|(k, _)| k.clone());
+        match victim {
+            Some(key) => {
+                registry.remove(&key);
+            }
+            None => return Upsert::Rejected,
+        }
+    }
+
+    registry.insert(
+        username.to_string(),
+        Peer {
+            username: username.to_string(),
+            ip: ip.to_string(),
+            port,
+            hostname: None,
+            last_seen: Instant::now(),
+            online: true,
+            connected: false,
+        },
+    );
+    Upsert::Inserted
+}
+
+/// Records that a peer is alive and reachable at `ip`.
+///
+/// Called for any valid packet from a known peer — discovery, key exchange,
+/// chat message or acknowledgement — so liveness does not depend on one
+/// particular packet type surviving the network.
+pub fn mark_reachable(registry: &mut HashMap<String, Peer>, username: &str, ip: &str) {
+    if let Some(peer) = registry.get_mut(username) {
+        peer.last_seen = Instant::now();
+        peer.online = true;
+        if peer.ip != ip {
+            peer.ip = ip.to_string();
+        }
     }
 }
 
-/// Background task that removes peers not seen within the timeout.
-/// Uses 60-second timeout instead of 15s — the old value was too aggressive
-/// and evicted peers before they could complete key exchange, especially
-/// on iSH where discovery is slow and unreliable.
+/// Marks a peer as having a negotiated session.
+pub fn mark_connected(registry: &mut HashMap<String, Peer>, username: &str) {
+    if let Some(peer) = registry.get_mut(username) {
+        peer.connected = true;
+        peer.online = true;
+        peer.last_seen = Instant::now();
+    }
+}
+
+/// Background task that flags silent peers as offline.
+///
+/// Entries are kept rather than deleted: a peer that drops one broadcast is
+/// still on the network, and removing them from the list mid-conversation
+/// looks like a disconnect. Only when the registry is full are the longest
+/// silent offline entries dropped to stay within `MAX_PEERS`.
 pub async fn cleanup_task(registry: PeerRegistry) {
     let mut tick = interval(Duration::from_secs(5));
-    let timeout = Duration::from_secs(60);
 
     loop {
         tick.tick().await;
-        let now = Instant::now();
+        let mut reg = registry.lock().await;
 
-        // Phase 1: Collect stale keys (brief lock)
-        let stale_keys: Vec<String> = {
-            let reg = registry.lock().await;
-            reg.iter()
-                .filter(|(_, p)| now.duration_since(p.last_seen) >= timeout)
-                .map(|(k, _)| k.clone())
-                .collect()
-        };
-
-        // Phase 2: Remove stale keys (only if needed)
-        if !stale_keys.is_empty() {
-            let mut reg = registry.lock().await;
-            for key in stale_keys {
-                reg.remove(&key);
+        for peer in reg.values_mut() {
+            if peer.last_seen.elapsed() >= OFFLINE_AFTER {
+                peer.online = false;
+                peer.connected = false;
             }
         }
+
+        drop(reg);
 
         // Yield to prevent starvation of other tasks on single-core systems
         tokio::task::yield_now().await;

@@ -10,7 +10,9 @@
 
 use crate::chat::messages::ChatMessage;
 use crate::crypto::key_exchange::X25519KeyPair;
-use crate::network::peer_registry::{upsert_peer, Peer, PeerRegistry, Upsert};
+use crate::network::peer_registry::{
+    mark_connected, mark_reachable, upsert_peer, PeerRegistry, Upsert,
+};
 use crate::network::discovery::sanitize_network_username;
 use crate::user::identity::LocalIdentity;
 use crate::user::trust_db::TrustDb;
@@ -230,6 +232,170 @@ pub fn create_signed_discovery(
     format!("{}|{}|{}", payload, ed_pub, sig)
 }
 
+/// Everything needed to answer a discovery announcement.
+///
+/// Bundled so the port-9877 listener and the chat-port listener can share one
+/// implementation. They previously had different behaviour, and the listener
+/// that actually receives broadcasts had no way to start a handshake — which
+/// is why peers appeared in the list but never connected on their own.
+pub struct DiscoveryCtx {
+    pub socket: Arc<UdpSocket>,
+    pub username: String,
+    pub ip: String,
+    pub chat_port: u16,
+    pub identity: Arc<LocalIdentity>,
+    pub keypair: Arc<X25519KeyPair>,
+    pub peers: PeerRegistry,
+    pub peer_keys: PeerKeyRegistry,
+}
+
+impl DiscoveryCtx {
+    /// Builds the key-exchange packet that introduces us to a peer.
+    fn key_packet(&self) -> String {
+        let pub_x25519 = self.keypair.public_key_hex();
+        let sig = self.identity.sign_payload(pub_x25519.as_bytes());
+        format!(
+            "HOPCHAT_KEY|{}|{}|{}|{}",
+            self.username,
+            pub_x25519,
+            self.identity.public_key_hex(),
+            sig
+        )
+    }
+}
+
+/// Handles one discovery announcement: registers the peer, greets it, and
+/// schedules a retry in case the reply is lost.
+///
+/// This is the whole auto-connect path. No user action is involved.
+pub async fn handle_discovery(packet_str: &str, src_addr: SocketAddr, ctx: &DiscoveryCtx) {
+    let src_ip = src_addr.ip().to_string();
+    let Some(disc) = parse_discovery_packet(packet_str, &src_ip) else {
+        return;
+    };
+    if disc.username == ctx.username {
+        return;
+    }
+
+    let outcome = {
+        let mut reg = ctx.peers.lock().await;
+        upsert_peer(&mut reg, &disc.username, &disc.ip, disc.port, disc.authenticated)
+    };
+    if outcome == Upsert::Rejected {
+        return;
+    }
+    if outcome == Upsert::Inserted {
+        crate::network::peer_registry::resolve_hostname(
+            ctx.peers.clone(),
+            disc.username.clone(),
+            disc.ip.clone(),
+        );
+    }
+
+    // Trust the peer's live state rather than the existence of a session
+    // entry. A peer that restarts generates a new key pair, and the stale
+    // session left behind would otherwise stop us from ever re-handshaking.
+    let already_connected = {
+        let reg = ctx.peers.lock().await;
+        reg.get(&disc.username).map_or(false, |p| p.connected)
+    };
+    if already_connected {
+        return;
+    }
+
+    // Reply where the packet came from, and again on the advertised chat port
+    // when that differs, so a peer bound to a dynamic port still hears us.
+    let mut targets = Vec::with_capacity(2);
+    targets.push(src_addr);
+    if let Ok(chat_addr) = format!("{}:{}", disc.ip, disc.port).parse::<SocketAddr>() {
+        if chat_addr != src_addr {
+            targets.push(chat_addr);
+        }
+    }
+
+    let echo = create_signed_discovery(&ctx.username, &ctx.ip, ctx.chat_port, &ctx.identity);
+    let key = ctx.key_packet();
+    for target in &targets {
+        let _ = ctx.socket.send_to(echo.as_bytes(), target).await;
+        let _ = ctx.socket.send_to(key.as_bytes(), target).await;
+    }
+
+    // One retry after a short pause, for the case where our greeting and
+    // theirs cross on a busy network and both are dropped.
+    let socket = ctx.socket.clone();
+    let username = disc.username.clone();
+    let peer_keys = ctx.peer_keys.clone();
+    let retry_targets = targets.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        if peer_keys.lock().await.contains_key(&username) {
+            return;
+        }
+        for target in &retry_targets {
+            let _ = socket.send_to(key.as_bytes(), target).await;
+        }
+    });
+}
+
+/// Starts a handshake with every peer we know about that has no session yet.
+///
+/// Discovery already greets peers as they appear; this catches the ones that
+/// were announced while we were starting up, so two devices coming online
+/// together connect without either user doing anything.
+pub async fn connect_pending(ctx: Arc<DiscoveryCtx>) {
+    let waiting: Vec<SocketAddr> = {
+        let reg = ctx.peers.lock().await;
+        reg.values()
+            .filter(|p| p.online && !p.connected)
+            .filter_map(|p| format!("{}:{}", p.ip, p.port).parse::<SocketAddr>().ok())
+            .collect()
+    };
+
+    let key = ctx.key_packet();
+    for addr in waiting {
+        let _ = ctx.socket.send_to(key.as_bytes(), &addr).await;
+    }
+}
+
+/// Re-announces us to peers we already have a session with.
+///
+/// Establishes nothing by itself: the peer already knows our key, and a
+/// repeated key packet derives the same session key, so the only effect is to
+/// refresh liveness in both directions. Without this, an idle conversation
+/// looks like a disconnection after a couple of missed broadcasts.
+pub async fn keepalive_task(ctx: Arc<DiscoveryCtx>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(20));
+
+    loop {
+        tick.tick().await;
+
+        // Anyone we can see but are not talking to yet.
+        connect_pending(ctx.clone()).await;
+
+        let connected: Vec<String> = ctx.peer_keys.lock().await.keys().cloned().collect();
+        if connected.is_empty() {
+            continue;
+        }
+
+        let targets: Vec<SocketAddr> = {
+            let reg = ctx.peers.lock().await;
+            reg.values()
+                .filter(|p| p.connected && p.last_seen.elapsed() >= Duration::from_secs(20))
+                .filter(|p| connected.contains(&p.username))
+                .filter_map(|p| format!("{}:{}", p.ip, p.port).parse::<SocketAddr>().ok())
+                .collect()
+        };
+        if targets.is_empty() {
+            continue;
+        }
+
+        let key = ctx.key_packet();
+        for addr in targets {
+            let _ = ctx.socket.send_to(key.as_bytes(), &addr).await;
+        }
+    }
+}
+
 /// A discovery announcement that passed parsing.
 pub struct Discovery {
     /// Sanitized peer username.
@@ -255,8 +421,11 @@ pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discover
         7 if parts[0] == "HOPCHAT" => {
             let timestamp: u64 = parts[4].parse().ok()?;
 
-            // Replay protection: 30 second freshness window.
-            if unix_timestamp().abs_diff(timestamp) > 30 {
+            // Clock sanity window. Devices on an isolated hotspot have no
+            // time source and drift apart, so this is deliberately loose;
+            // replay of chat traffic is caught by the per-peer sequence
+            // window, which does not depend on wall-clock time at all.
+            if unix_timestamp().abs_diff(timestamp) > 300 {
                 return None;
             }
 
@@ -354,72 +523,17 @@ pub async fn listen_for_messages(
                 // HOPCHAT Discovery Packets (on chat port)
                 // ==========================================================
                 if packet_str.starts_with("HOPCHAT|") && !packet_str.starts_with("HOPCHAT_") {
-                    let src_ip_str = src_addr.ip().to_string();
-                    if let Some(disc) = parse_discovery_packet(packet_str, &src_ip_str) {
-                        if disc.username == our_username {
-                            continue;
-                        }
-
-                        let outcome = {
-                            let mut reg = peer_registry.lock().await;
-                            upsert_peer(
-                                &mut reg,
-                                &disc.username,
-                                &disc.ip,
-                                disc.port,
-                                disc.authenticated,
-                            )
-                        };
-
-                        if outcome == Upsert::Rejected {
-                            continue;
-                        }
-                        if outcome == Upsert::Inserted {
-                            crate::network::peer_registry::resolve_hostname(
-                                peer_registry.clone(),
-                                disc.username.clone(),
-                                disc.ip.clone(),
-                            );
-                        }
-
-                        // Reply at most once per peer: on first contact, or when
-                        // we still have no session with them. Echoing every
-                        // announcement back makes two nodes ping-pong forever.
-                        let have_session = peer_keys.lock().await.contains_key(&disc.username);
-                        if outcome == Upsert::Updated && have_session {
-                            continue;
-                        }
-
-                        let echo = create_signed_discovery(
-                            &our_username,
-                            &our_ip,
-                            our_chat_port,
-                            &local_identity,
-                        );
-                        let pub_x25519 = local_keypair.public_key_hex();
-                        let sig = local_identity.sign_payload(pub_x25519.as_bytes());
-                        let key_payload = format!(
-                            "HOPCHAT_KEY|{}|{}|{}|{}",
-                            our_username,
-                            pub_x25519,
-                            local_identity.public_key_hex(),
-                            sig
-                        );
-
-                        // Answer on the socket the packet came from and, when it
-                        // differs, on the peer's advertised chat port.
-                        let mut targets = Vec::with_capacity(2);
-                        targets.push(src_addr);
-                        if let Ok(chat_addr) = format!("{}:{}", disc.ip, disc.port).parse::<SocketAddr>() {
-                            if chat_addr != src_addr {
-                                targets.push(chat_addr);
-                            }
-                        }
-                        for target in targets {
-                            let _ = socket.send_to(echo.as_bytes(), &target).await;
-                            let _ = socket.send_to(key_payload.as_bytes(), &target).await;
-                        }
-                    }
+                    let ctx = DiscoveryCtx {
+                        socket: socket.clone(),
+                        username: our_username.clone(),
+                        ip: our_ip.clone(),
+                        chat_port: our_chat_port,
+                        identity: local_identity.clone(),
+                        keypair: local_keypair.clone(),
+                        peers: peer_registry.clone(),
+                        peer_keys: peer_keys.clone(),
+                    };
+                    handle_discovery(packet_str, src_addr, &ctx).await;
 
                 // ==========================================================
                 // HOPCHAT_ACK
@@ -512,18 +626,16 @@ pub async fn listen_for_messages(
                                     let mut reg = peer_registry.lock().await;
                                     let is_new = !reg.contains_key(&sender_username);
                                     let peer_ip = src_addr.ip().to_string();
-                                    if let Some(existing) = reg.get_mut(&sender_username) {
-                                        existing.ip = peer_ip.clone();
-                                        existing.last_seen = tokio::time::Instant::now();
-                                    } else {
-                                        reg.insert(sender_username.clone(), Peer {
-                                            username: sender_username.clone(),
-                                            ip: peer_ip.clone(),
-                                            port: src_addr.port(),
-                                            hostname: None,
-                                            last_seen: tokio::time::Instant::now(),
-                                        });
+                                    if is_new {
+                                        upsert_peer(
+                                            &mut reg,
+                                            &sender_username,
+                                            &peer_ip,
+                                            src_addr.port(),
+                                            true,
+                                        );
                                     }
+                                    mark_connected(&mut reg, &sender_username);
                                     drop(reg);
                                     if is_new {
                                         crate::network::peer_registry::resolve_hostname(
@@ -607,12 +719,10 @@ pub async fn listen_for_messages(
                         let ack = format!("HOPCHAT_ACK|{}", msg_id);
                         let _ = socket.send_to(ack.as_bytes(), &src_addr).await;
 
-                        // Refresh peer last_seen
+                        // Any authenticated message proves the peer is alive
                         {
                             let mut reg = peer_registry.lock().await;
-                            if let Some(peer) = reg.get_mut(&peer_username) {
-                                peer.last_seen = tokio::time::Instant::now();
-                            }
+                            mark_reachable(&mut reg, &peer_username, &src_addr.ip().to_string());
                         }
 
                         // Sliding window replay check (per-peer)

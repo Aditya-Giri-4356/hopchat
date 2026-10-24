@@ -172,6 +172,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Step 4: Spawn background network tasks ---
 
+    // Shared context for every discovery path, so both listeners behave the
+    // same way and either one can start a handshake.
+    let discovery_ctx = Arc::new(messaging::DiscoveryCtx {
+        socket: shared_socket.clone(),
+        username: username.clone(),
+        ip: local_ip.clone(),
+        chat_port,
+        identity: local_identity.clone(),
+        keypair: local_keypair.clone(),
+        peers: peers.clone(),
+        peer_keys: peer_keys.clone(),
+    });
+
     // UDP discovery: broadcast our signed presence
     {
         let u = username.clone();
@@ -186,12 +199,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // UDP discovery: listen for peers (binds to port 9877)
     {
-        let u = username.clone();
-        let p = peers.clone();
+        let ctx = discovery_ctx.clone();
         tokio::spawn(async move {
-            if let Err(e) = discovery::listen_for_peers(u, p).await {
+            if let Err(e) = discovery::listen_for_peers(ctx).await {
                 eprintln!("[hopchat] listen_for_peers stopped: {} — chat port listener still active", e);
             }
+        });
+    }
+
+    // Liveness: re-announce to peers we already have a session with
+    {
+        let ctx = discovery_ctx.clone();
+        tokio::spawn(async move {
+            messaging::keepalive_task(ctx).await;
         });
     }
 
@@ -338,18 +358,30 @@ async fn run_event_loop(
     state: &mut AppState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut event_stream = EventStream::new();
-    
+    // Re-check the local address periodically so the address shown on screen,
+    // and the subnet we sweep, follow us onto a new network.
+    let mut frames_until_ip_refresh: u32 = 0;
+
     loop {
         // Check the shared quit flag
         if state.quit_requested.load(Ordering::Relaxed) {
             break;
         }
 
+        if frames_until_ip_refresh == 0 {
+            state.scanner.local_ip = get_local_ip();
+            frames_until_ip_refresh = 200; // roughly ten seconds at 50ms/frame
+        }
+        frames_until_ip_refresh -= 1;
+
         // --- Get current peer list snapshot ---
-        let peers_snapshot: Vec<Peer> = {
+        // Sorted, because HashMap iteration order changes between frames and
+        // the highlighted row would move on its own.
+        let mut peers_snapshot: Vec<Peer> = {
             let peers_lock = state.peers.lock().await;
             peers_lock.values().cloned().collect()
         };
+        peers_snapshot.sort_by(|a, b| a.username.cmp(&b.username));
 
         // Clamp selected_peer to valid range
         if !peers_snapshot.is_empty() && state.selected_peer >= peers_snapshot.len() {
@@ -380,6 +412,7 @@ async fn run_event_loop(
                 &app_layout,
                 &state.username,
                 &peers_snapshot,
+                &state.scanner.local_ip,
                 state.selected_peer,
                 &active_messages,
                 &state.input_buffer,

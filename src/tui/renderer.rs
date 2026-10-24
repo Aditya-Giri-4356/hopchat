@@ -17,6 +17,7 @@ pub fn render_ui(
     layout: &AppLayout,
     username: &str,
     peers: &[Peer],
+    local_ip: &str,
     selected_peer: usize,
     messages: &[ChatMessage],
     input: &str,
@@ -25,7 +26,7 @@ pub fn render_ui(
     scanner_index: usize,
 ) {
     render_header(frame, layout.header);
-    render_friends(frame, layout.friends, peers, selected_peer);
+    render_friends(frame, layout.friends, peers, local_ip, selected_peer);
     
     // Only render network map and status if they have space (Desktop layout)
     if layout.network_map.width > 0 {
@@ -52,7 +53,7 @@ pub fn render_ui(
     render_input(frame, layout.input, input, cursor_pos);
 
     if scanner_visible {
-        render_scanner_popup(frame, peers, scanner_index);
+        render_scanner_popup(frame, peers, local_ip, scanner_index);
     }
 }
 
@@ -79,38 +80,57 @@ fn render_friends(
     frame: &mut Frame,
     area: Rect,
     peers: &[Peer],
+    local_ip: &str,
     selected: usize,
 ) {
+    let connected = peers.iter().filter(|p| p.connected).count();
+
     let items: Vec<ListItem> = if peers.is_empty() {
-        vec![ListItem::new("  (no peers found)").style(Style::default().fg(Color::DarkGray))]
+        vec![
+            ListItem::new("  Looking for people on this network...")
+                .style(Style::default().fg(Color::Gray)),
+            ListItem::new(format!("  You are {}", local_ip))
+                .style(Style::default().fg(Color::DarkGray)),
+            ListItem::new("  Anyone on the same Wi-Fi or hotspot")
+                .style(Style::default().fg(Color::DarkGray)),
+            ListItem::new("  shows up here on their own.")
+                .style(Style::default().fg(Color::DarkGray)),
+        ]
     } else {
         peers
             .iter()
             .enumerate()
             .map(|(i, peer)| {
-                // [UI-MOB-2] Use >> marker and Green bg for universal readability
-                let (text, style) = if i == selected {
-                    (
-                        format!(">> {}", peer.username),
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    )
+                // Filled dot = encrypted session, hollow = seen but not
+                // connected, dim = offline. The name is the thing to read;
+                // the address is small print.
+                let (marker, name_style) = if peer.connected {
+                    ("●", Style::default().fg(Color::Green))
+                } else if peer.online {
+                    ("○", Style::default().fg(Color::Yellow))
                 } else {
-                    (
-                        format!("   {}", peer.username),
-                        Style::default().fg(Color::Green),
-                    )
+                    ("·", Style::default().fg(Color::DarkGray))
                 };
-                ListItem::new(text).style(style)
+
+                let text = format!("{} {}", marker, peer.username);
+                let style = if i == selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    name_style
+                };
+                ListItem::new(if i == selected { format!(">> {}", text) } else { format!("   {}", text) })
+                    .style(style)
             })
             .collect()
     };
 
+    let title = format!(" NEARBY  {}/{} connected ", connected, peers.len());
     let list = List::new(items).block(
         Block::default()
-            .title(" FRIENDS ")
+            .title(title)
             .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
@@ -136,9 +156,16 @@ fn render_network_map(
     )));
 
     for peer in peers {
+        let (label, style) = if peer.connected {
+            ("connected", Color::Green)
+        } else if peer.online {
+            ("seen", Color::Yellow)
+        } else {
+            ("offline", Color::DarkGray)
+        };
         lines.push(Line::from(Span::styled(
-            format!("   ├── {}", peer.username),
-            Style::default().fg(Color::Green),
+            format!("   ├── {} ({})", peer.username, label),
+            Style::default().fg(style),
         )));
     }
 
@@ -174,9 +201,17 @@ fn render_network_status(
     peers: &[Peer],
 ) {
     let peer_count = peers.len();
+    let connected = peers.iter().filter(|p| p.connected).count();
     let status_text = format!(
-        " Online: {}  |  Peers: {}  |  BLE: --  |  Range: LAN",
-        if peer_count > 0 { "CONNECTED" } else { "SCANNING" },
+        " {}  |  Connected: {}  |  Nearby: {}  |  BLE: --  |  Range: LAN",
+        if connected > 0 {
+            "CONNECTED"
+        } else if peer_count > 0 {
+            "CONNECTING"
+        } else {
+            "SCANNING"
+        },
+        connected,
         peer_count
     );
 
@@ -327,7 +362,7 @@ fn render_mobile_status(frame: &mut Frame, area: Rect, username: &str, peers: &[
 /// [UI-DESK-6] [UI-MOB-6] Renders the network scanner interactive popup overlay.
 /// Popup dimensions are dynamically scaled to the terminal size with padding,
 /// and a scroll position indicator is shown when the list exceeds visible height.
-fn render_scanner_popup(frame: &mut Frame, peers: &[Peer], selected_index: usize) {
+fn render_scanner_popup(frame: &mut Frame, peers: &[Peer], local_ip: &str, selected_index: usize) {
     let area = frame.size();
     
     // [UI-MOB-6] Scale popup to terminal width with 2-char padding on each side, max 60
@@ -343,14 +378,17 @@ fn render_scanner_popup(frame: &mut Frame, peers: &[Peer], selected_index: usize
 
     frame.render_widget(Clear, popup_area); // Clear background
 
-    let title = " Network Subnet Scanner (Tab to close) ";
+    let title = " Nearby  (Tab to close) ";
 
     // [UI-DESK-6] Footer with scroll position indicator
     let visible_items = popup_height.saturating_sub(4) as usize; // borders + header + footer padding
+    let connected = peers.iter().filter(|p| p.connected).count();
     let footer = if peers.len() > visible_items {
-        format!(" [{}/{}] Up/Down to scroll ", selected_index + 1, peers.len())
+        format!(" [{}/{}] Enter connects ", selected_index + 1, peers.len())
+    } else if peers.is_empty() {
+        format!(" You are {} — searching... ", local_ip)
     } else {
-        format!(" {} peer(s) found ", peers.len())
+        format!(" {} connected of {}  |  Enter connects ", connected, peers.len())
     };
 
     let block = Block::default()
@@ -360,17 +398,30 @@ fn render_scanner_popup(frame: &mut Frame, peers: &[Peer], selected_index: usize
         .style(Style::default().bg(Color::Black));
 
     let mut items: Vec<ListItem> = if peers.is_empty() {
-        vec![ListItem::new("  (Scanning... No peers found yet)").style(Style::default().fg(Color::DarkGray))]
+        vec![
+            ListItem::new("  Looking for people nearby...")
+                .style(Style::default().fg(Color::Gray)),
+            ListItem::new("  Same Wi-Fi or hotspot is all it takes.")
+                .style(Style::default().fg(Color::DarkGray)),
+        ]
     } else {
         peers.iter().enumerate().map(|(i, peer)| {
-            let hostname_str = if let Some(ref h) = peer.hostname {
-                format!(" ({})", h)
+            let (marker, state) = if peer.connected {
+                ("●", "connected")
+            } else if peer.online {
+                ("○", "connecting")
             } else {
-                "".to_string()
+                ("·", "offline")
             };
-            
-            let display_str = format!(" {} - {}{}", peer.username, peer.ip, hostname_str);
-            let mut style = Style::default().fg(Color::White);
+
+            let display_str = format!(" {} {}  [{}]", marker, peer.username, state);
+            let mut style = Style::default().fg(if peer.connected {
+                Color::Green
+            } else if peer.online {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            });
             
             if i == selected_index {
                 style = style.bg(Color::Blue).add_modifier(Modifier::BOLD);
