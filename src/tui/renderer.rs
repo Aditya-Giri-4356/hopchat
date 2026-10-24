@@ -289,12 +289,35 @@ fn render_chat(
         })
         .collect();
 
-    // Auto-scroll: only show the last N lines that fit
+    // Auto-scroll to the bottom.
+    //
+    // Counting messages was wrong: a wrapped message occupies several terminal
+    // rows, so the rendered text overflowed the panel and pushed the newest
+    // messages off the bottom. Count the rows each line actually needs at this
+    // width and scroll by the overflow instead.
     let visible_height = area.height.saturating_sub(2) as usize;
-    let start = chat_lines.len().saturating_sub(visible_height);
+    let usable_width = area.width.saturating_sub(2).max(1) as usize;
 
-    let chat = Paragraph::new(chat_lines[start..].to_vec())
+    let rendered_rows: usize = chat_lines
+        .iter()
+        .map(|line| {
+            // Line::width is the unicode display width, so double-width
+            // characters count correctly instead of one column each.
+            let width = line.width();
+            if width == 0 {
+                1
+            } else {
+                (width + usable_width - 1) / usable_width
+            }
+        })
+        .sum();
+
+    let scroll_y = rendered_rows.saturating_sub(visible_height);
+    let scroll_y = scroll_y.min(u16::MAX as usize) as u16;
+
+    let chat = Paragraph::new(chat_lines)
         .wrap(Wrap { trim: false })
+        .scroll((scroll_y, 0))
         .block(
             Block::default()
                 .title(chat_title)

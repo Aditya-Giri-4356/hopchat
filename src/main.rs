@@ -61,6 +61,8 @@ pub struct AppState {
     pub chat_history: ChatHistory,
     /// Shared tracker for outbound messages awaiting ACKs
     ack_registry: AckRegistry,
+    /// Persistent TOFU trust database (pinned peer identities)
+    pub trust_db: TrustRegistry,
     /// Registry mapping peer usernames to their session (key + replay window)
     pub peer_keys: PeerKeyRegistry,
     /// The local keypair
@@ -119,6 +121,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = cli::args::parse_args();
 
     // --- Step 2: Login ---
+    // Remembered so the interactive pause is skipped when the username was
+    // supplied with -u, which is what makes scripted and piped launches work.
+    let interactive_prompt = config.username.is_none();
     let username = config.username.unwrap_or_else(prompt_username);
 
     // Detect local IP address robustly
@@ -126,10 +131,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chat_port_target = config.port;
 
     println!("\n  Starting HOPCHAT as '{}' on {}:{}", username, local_ip, chat_port_target);
-    println!("  Press any key to enter the chat...");
 
-    // Wait for a keypress before entering TUI
-    let _ = io::stdin().read_line(&mut String::new());
+    if interactive_prompt {
+        println!("  Press any key to enter the chat...");
+        let _ = io::stdin().read_line(&mut String::new());
+    }
 
     // --- Step 3: Set up shared state ---
     let local_identity = Arc::new(LocalIdentity::load_or_create(&username));
@@ -153,6 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         peers: peers.clone(),
         chat_history: chat_history.clone(),
         ack_registry: ack_registry.clone(),
+        trust_db: trust_db.clone(),
         peer_keys: peer_keys.clone(),
         outbound_socket: shared_socket.clone(),
         keypair: local_keypair.clone(),
@@ -289,20 +296,28 @@ fn spawn_subnet_scan(state: &AppState) {
     );
 
     let disc_port = discovery::DISCOVERY_PORT;
-    // Our own advertised port — a peer that had to fall back to a dynamic port
-    // is only reachable if we sweep the port it is actually listening on.
-    let chat_port = state.chat_port;
+
+    // Sweep the default chat port as well as our own. A peer that stayed on
+    // the default is invisible to a sweep that only targets a non-standard
+    // port, and vice versa when we are the one on a non-standard port.
+    let mut chat_ports = vec![crate::PREFERRED_CHAT_PORT];
+    if state.chat_port != crate::PREFERRED_CHAT_PORT {
+        chat_ports.push(state.chat_port);
+    }
 
     tokio::spawn(async move {
         for host in 1..=254u8 {
             let target_ip = format!("{}.{}", prefix, host);
             let target_disc = format!("{}:{}", target_ip, disc_port);
-            let target_chat = format!("{}:{}", target_ip, chat_port);
 
             let _ = socket.send_to(discovery_payload.as_bytes(), &target_disc).await;
-            let _ = socket.send_to(discovery_payload.as_bytes(), &target_chat).await;
             let _ = socket.send_to(key_payload.as_bytes(), &target_disc).await;
-            let _ = socket.send_to(key_payload.as_bytes(), &target_chat).await;
+
+            for port in &chat_ports {
+                let target_chat = format!("{}:{}", target_ip, port);
+                let _ = socket.send_to(discovery_payload.as_bytes(), &target_chat).await;
+                let _ = socket.send_to(key_payload.as_bytes(), &target_chat).await;
+            }
 
             // Pace the burst so receivers can drain their socket buffers.
             if host % 8 == 0 {
@@ -389,10 +404,13 @@ async fn run_event_loop(
         }
 
         // --- Get chat history snapshot for selected peer ---
+        // With no peer selected, fall back to the GLOBAL thread. System output
+        // such as /help and /peers is written there, and it used to be
+        // unreachable because this returned an empty key.
         let selected_username = if !peers_snapshot.is_empty() {
             peers_snapshot[state.selected_peer].username.clone()
         } else {
-            String::new()
+            "GLOBAL".to_string()
         };
 
         // Convert VecDeque to Vec at the render boundary
@@ -428,6 +446,29 @@ async fn run_event_loop(
 
         match action {
             input::InputAction::Quit => break,
+
+            input::InputAction::Escape => {
+                if state.scanner.is_visible {
+                    state.scanner.is_visible = false;
+                } else {
+                    break;
+                }
+            }
+
+            input::InputAction::CursorLeft => {
+                if !state.scanner.is_visible && state.cursor_pos > 0 {
+                    state.cursor_pos -= 1;
+                }
+            }
+
+            input::InputAction::CursorRight => {
+                if !state.scanner.is_visible {
+                    let len = state.input_buffer.chars().count();
+                    if state.cursor_pos < len {
+                        state.cursor_pos += 1;
+                    }
+                }
+            }
 
             input::InputAction::Click(x, y) => {
                 if let Some(quit_rect) = state.last_quit_button_rect {
@@ -495,8 +536,12 @@ async fn run_event_loop(
             input::InputAction::Send => {
                 if state.scanner.is_visible {
                     if !peers_snapshot.is_empty() && state.scanner.selected_index < peers_snapshot.len() {
-                        let target_ip = peers_snapshot[state.scanner.selected_index].ip.clone();
-                        let cmd_input = format!("/connect {}", target_ip);
+                        // Carry the peer's port across. Formatting only the IP
+                        // meant anyone on a non-default port was unreachable
+                        // from the list that is supposed to exist to avoid
+                        // typing addresses by hand.
+                        let target = &peers_snapshot[state.scanner.selected_index];
+                        let cmd_input = format!("/connect {} {}", target.ip, target.port);
                         cli::commands::handle_command(state, &cmd_input).await;
                     }
                     state.scanner.is_visible = false;
@@ -549,27 +594,38 @@ async fn run_event_loop(
                                     .or_insert_with(VecDeque::new);
                                 list.push_back(message.clone());
                                 if list.len() > 1000 { list.pop_front(); }
-                                    
-                                let secure_ux_msg = ChatMessage::new(
-                                    "SYSTEM",
-                                    &peer.username,
-                                    "Sent (Encrypted ✓)",
-                                );
-                                list.push_back(secure_ux_msg);
-                                if list.len() > 1000 { list.pop_front(); }
                             }
 
-                            // Send to the peer asynchronously
+                            // Send to the peer asynchronously, reporting the
+                            // real outcome. Claiming delivery up front was a lie
+                            // whenever the retries timed out, and the failure
+                            // only ever reached stderr, which the TUI hides.
                             if let Ok(addr) = peer.socket_addr() {
                                 let msg = message;
                                 let acks = state.ack_registry.clone();
                                 let socket_clone = state.outbound_socket.clone();
+                                let history_handle = state.chat_history.clone();
+                                let peer_name = peer.username.clone();
+
                                 tokio::spawn(async move {
-                                    if let Err(e) = messaging::send_message_with_retry(
+                                    let outcome = messaging::send_message_with_retry(
                                         socket_clone, addr, &msg, acks, session_key,
-                                    ).await {
-                                        eprintln!("[ERROR] Message delivery failed: {}", e);
-                                    }
+                                    ).await;
+
+                                    let text = match outcome {
+                                        Ok(_) => "Delivered ✓".to_string(),
+                                        Err(_) => format!(
+                                            "Not delivered — {} did not respond",
+                                            peer_name
+                                        ),
+                                    };
+
+                                    let mut history_lock = history_handle.lock().await;
+                                    let list = history_lock
+                                        .entry(peer_name.clone())
+                                        .or_insert_with(VecDeque::new);
+                                    list.push_back(ChatMessage::new("SYSTEM", &peer_name, &text));
+                                    if list.len() > 1000 { list.pop_front(); }
                                 });
                             }
 
@@ -588,9 +644,24 @@ async fn run_event_loop(
                                 );
                                 
                                 let socket_clone = state.outbound_socket.clone();
+                                let history_handle = state.chat_history.clone();
+                                let peer_name = peer.username.clone();
                                 tokio::spawn(async move {
                                     if let Err(e) = messaging::send_raw_packet(&socket_clone, addr, &handshake_packet).await {
-                                        eprintln!("[ERROR] Key exchange packet failed: {}", e);
+                                        // Same reason as the delivery status above:
+                                        // stderr is invisible once the TUI owns the
+                                        // screen, so a failed handshake looked like
+                                        // nothing happening at all.
+                                        let mut history_lock = history_handle.lock().await;
+                                        let list = history_lock
+                                            .entry(peer_name.clone())
+                                            .or_insert_with(VecDeque::new);
+                                        list.push_back(ChatMessage::new(
+                                            "SYSTEM",
+                                            &peer_name,
+                                            &format!("Could not reach {} to start the key exchange: {}", peer_name, e),
+                                        ));
+                                        if list.len() > 1000 { list.pop_front(); }
                                     }
                                 });
                             }

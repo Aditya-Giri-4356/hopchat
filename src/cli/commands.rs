@@ -62,7 +62,10 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
                 "Commands:\n\
                 /nearby       - Open the Nearby window (who is around you)\n\
                 /peers        - List everyone on this network and their status\n\
-                /connect <ip> - Rarely needed: peers connect on their own\n\
+                /trust        - Show the identity keys pinned for your peers\n\
+                /unpin <name> - Forget a pinned key so a peer can pair again\n\
+                /clear        - Clear this conversation\n\
+                /connect <ip> [port] - Rarely needed: peers connect on their own\n\
                 /quit         - Exit HopChat"
             );
         }
@@ -97,11 +100,76 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
             state.quit_requested.store(true, std::sync::atomic::Ordering::Relaxed);
             return CommandResult::Handled;
         }
+        "/trust" => {
+            let entries = {
+                let db = state.trust_db.lock().await;
+                db.entries()
+            };
+
+            if entries.is_empty() {
+                push_system_msg(
+                    "No identities pinned yet. Peers are pinned automatically the \
+                     first time they connect.",
+                );
+            } else {
+                let mut out = String::from("Pinned identities:\n");
+                for (user, key) in entries {
+                    let short: String = key.chars().take(16).collect();
+                    out.push_str(&format!("- {} {}\n", user, short));
+                }
+                out.push_str("Use /unpin <username> to forget one.");
+                push_system_msg(out.trim_end());
+            }
+        }
+        "/unpin" => {
+            if parts.len() < 2 {
+                push_system_msg("Usage: /unpin <username>");
+            } else {
+                let target = parts[1];
+                let removed = {
+                    let mut db = state.trust_db.lock().await;
+                    db.unpin(target)
+                };
+
+                if removed {
+                    push_system_msg(&format!(
+                        "Forgot the pinned key for {}. It will be pinned again on next contact.",
+                        target
+                    ));
+                } else {
+                    push_system_msg(&format!("No pinned key stored for {}.", target));
+                }
+            }
+        }
+        "/clear" => {
+            match active_peer_username.clone() {
+                Some(peer) => {
+                    {
+                        let mut history = state.chat_history.lock().await;
+                        history.remove(&peer);
+                    }
+                    push_system_msg(&format!("Cleared the conversation with {}.", peer));
+                }
+                None => {
+                    {
+                        let mut history = state.chat_history.lock().await;
+                        history.clear();
+                    }
+                    push_system_msg("Cleared chat history.");
+                }
+            }
+        }
         "/connect" => {
             if parts.len() < 2 {
-                push_system_msg("Usage: /connect <ip>");
+                push_system_msg("Usage: /connect <ip> [port]");
+            } else if parts.len() > 2 && parts[2].parse::<u16>().is_err() {
+                push_system_msg(&format!(
+                    "Invalid port: {}. Usage: /connect <ip> [port]",
+                    parts[2]
+                ));
             } else {
                 let target_ip = parts[1].to_string();
+                let explicit_port: Option<u16> = parts.get(2).and_then(|p| p.parse().ok());
 
                 if target_ip.parse::<std::net::IpAddr>().is_err() {
                     push_system_msg(&format!("Invalid IP address: {}", target_ip));
@@ -122,12 +190,15 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
                         state.username, pub_x25519, pub_ed25519, sig
                     );
 
-                    let peer_chat_port = {
-                        let peers_lock = state.peers.lock().await;
-                        peers_lock.values()
-                            .find(|p| p.ip == target_ip)
-                            .map(|p| p.port)
-                            .unwrap_or(crate::PREFERRED_CHAT_PORT)
+                    let peer_chat_port = match explicit_port {
+                        Some(port) => port,
+                        None => {
+                            let peers_lock = state.peers.lock().await;
+                            peers_lock.values()
+                                .find(|p| p.ip == target_ip)
+                                .map(|p| p.port)
+                                .unwrap_or(crate::PREFERRED_CHAT_PORT)
+                        }
                     };
 
                     let discovery_port = crate::network::discovery::DISCOVERY_PORT;

@@ -713,6 +713,20 @@ pub async fn listen_for_messages(
                     }
 
                     if let (Some(msg), Some(peer_username)) = (decrypted_msg, matched_username) {
+                        // Both directions share one symmetric key, so a datagram
+                        // reflected back at us decrypts perfectly and would look
+                        // like a message from the peer. The routing fields inside
+                        // the ciphertext are the only thing that distinguish the
+                        // two: it must be addressed to us, and it must not be
+                        // from us. This runs before the ACK, otherwise a reflector
+                        // still gets acknowledged and still keeps the peer alive.
+                        if msg.sender == our_username
+                            || msg.receiver != our_username
+                            || msg.sender != peer_username
+                        {
+                            continue;
+                        }
+
                         let msg_id = msg.id;
 
                         // Send ACK
