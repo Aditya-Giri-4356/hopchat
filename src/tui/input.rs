@@ -24,8 +24,14 @@ pub enum InputAction {
     SelectDown,
     /// Quit the application
     Quit,
+    /// Escape: close the open overlay, or quit when nothing is open
+    Escape,
     /// Toggle the network scanner overlay
     ToggleScanner,
+    /// Move the text cursor one character left
+    CursorLeft,
+    /// Move the text cursor one character right
+    CursorRight,
     /// A mouse click occurred at (x, y)
     Click(u16, u16),
     /// No action (timeout or irrelevant event)
@@ -50,10 +56,12 @@ pub async fn next_input_event(stream: &mut EventStream, max_wait: Duration) -> I
                     {
                         InputAction::Quit
                     }
-                    KeyCode::Esc => InputAction::Quit,
+                    KeyCode::Esc => InputAction::Escape,
                     KeyCode::Tab => InputAction::ToggleScanner,
                     KeyCode::Enter => InputAction::Send,
                     KeyCode::Backspace => InputAction::Backspace,
+                    KeyCode::Left => InputAction::CursorLeft,
+                    KeyCode::Right => InputAction::CursorRight,
                     KeyCode::Up => InputAction::SelectUp,
                     KeyCode::Down => InputAction::SelectDown,
                     KeyCode::Char(c) => InputAction::Character(c),

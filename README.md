@@ -178,7 +178,7 @@ Because iOS (iSH) and Android (Termux) use emulated or restrictive network stack
 This will instantly pop open an interactive overlay displaying active HopChat peers.
 
 **Navigation:** 
-- Use the **Up** and **Down** arrow keys to highlight a user. 
+- Use the **Left** and **Right** arrow keys to move the cursor while typing, **Up** and **Down** to highlight a user in the scanner. 
 - Press **Enter** to instantly connect to them and initiate a Diffie-Hellman key exchange.
 - Press `Ctrl-C` or `ESC` to close the scanner.
 
@@ -193,8 +193,12 @@ Inside the chat buffer, you can execute special slash commands:
 
 - `/help` - Show the contextual help menu.
 - `/scan` - Launch the Interactive Subnet Scanner (especially useful on mobile).
+- `/nearby` - Open the Nearby window, the same list the scanner gives you.
 - `/peers` - List all currently active peers, along with their resolved local IP addresses.
-- `/connect <ip>` - Manually fire a handshake to a specific IP Address. (The Subnet Scanner is highly recommended over this).
+- `/connect <ip> [port]` - Manually fire a handshake to a specific address. The port is optional and defaults to the peer's advertised one. (The Subnet Scanner is highly recommended over this).
+- `/trust` - Show the identity keys pinned for your peers so far.
+- `/unpin <username>` - Forget a pinned key. Use this when a peer reinstalls and comes back with a new identity; otherwise the old pin rejects them.
+- `/clear` - Clear the conversation you are currently looking at.
 - `/quit` - Safely exit the application. Alternatively, tap the **`[ QUIT ]`** button on mobile.
 
 ---

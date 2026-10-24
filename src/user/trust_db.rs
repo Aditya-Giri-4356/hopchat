@@ -84,6 +84,30 @@ impl TrustDb {
         }
     }
 
+    /// Every pinned username and its hex public key, sorted by name.
+    pub fn entries(&self) -> Vec<(String, String)> {
+        let mut all: Vec<(String, String)> = self
+            .known_peers
+            .iter()
+            .map(|(user, key)| (user.clone(), key.clone()))
+            .collect();
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        all
+    }
+
+    /// Forgets a pinned key so the peer is re-pinned on next contact.
+    ///
+    /// Without this, a peer who reinstalls and regenerates their identity is
+    /// locked out for good: their new key fails the mismatch check every time
+    /// and the only escape is deleting the database file by hand.
+    pub fn unpin(&mut self, username: &str) -> bool {
+        let removed = self.known_peers.remove(username).is_some();
+        if removed {
+            self.save();
+        }
+        removed
+    }
+
     fn db_path() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))

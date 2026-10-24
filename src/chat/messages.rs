@@ -8,7 +8,6 @@
 
 use crate::crypto::encryption;
 use once_cell::sync::Lazy;
-use rand::Rng;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // [SEC-8] Use AtomicU64 on 64-bit targets for lock-free, panic-proof ID generation.
@@ -20,15 +19,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_pointer_width = "64"))]
 use std::sync::Mutex;
 
+/// Starting value for the message counter.
+///
+/// Milliseconds since the Unix epoch. The counter has to keep increasing
+/// across process restarts, because the remote side orders messages by ID and
+/// treats anything far below the highest it has seen as a replay. A random
+/// seed can land near u64::MAX and wrap, which would make every later message
+/// look ancient; starting from zero would reuse IDs on every launch. Wall
+/// clock milliseconds do neither, and two devices never share a counter.
+fn seed_message_id() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(1)
+        .max(1)
+}
+
 #[cfg(target_pointer_width = "64")]
-static NEXT_MESSAGE_ID: Lazy<AtomicU64> = Lazy::new(|| {
-    AtomicU64::new(rand::thread_rng().gen::<u64>())
-});
+static NEXT_MESSAGE_ID: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(seed_message_id()));
 
 #[cfg(not(target_pointer_width = "64"))]
-static NEXT_MESSAGE_ID: Lazy<Mutex<u64>> = Lazy::new(|| {
-    Mutex::new(rand::thread_rng().gen::<u64>())
-});
+static NEXT_MESSAGE_ID: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(seed_message_id()));
 
 use serde::{Serialize, Deserialize};
 
