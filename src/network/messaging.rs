@@ -277,6 +277,20 @@ pub async fn handle_discovery(packet_str: &str, src_addr: SocketAddr, ctx: &Disc
         return;
     }
 
+    // A signed packet proves who wrote it, not where it was sent from. Anyone
+    // on the LAN can replay somebody else's announcement from their own
+    // address, so a packet whose signed address does not match its source may
+    // introduce a new peer but must never update one we already track —
+    // otherwise a single replayed broadcast silently redirects an existing
+    // conversation to the attacker.
+    let already_known = {
+        let reg = ctx.peers.lock().await;
+        reg.contains_key(&disc.username)
+    };
+    if already_known && !may_refresh_known_peer(&disc) {
+        return;
+    }
+
     let outcome = {
         let mut reg = ctx.peers.lock().await;
         upsert_peer(&mut reg, &disc.username, &disc.ip, disc.port, disc.authenticated)
@@ -406,18 +420,33 @@ pub struct Discovery {
     pub port: u16,
     /// False for legacy 4-field packets, which carry no signature.
     pub authenticated: bool,
+    /// True when the address signed into the packet matches the address it
+    /// actually came from. A forwarded (replayed) announcement is authentic
+    /// but not address-bound, so it cannot be trusted to relocate a peer.
+    pub address_bound: bool,
+}
+
+/// Whether an announcement may update a peer we already have on record.
+///
+/// Legacy unsigned packets are left to `upsert_peer`, which already refuses
+/// to move a known peer. A signed packet is only allowed to update one when
+/// its signed address matches the source, which is what stops a replay from
+/// rebinding the peer to the sender's own address.
+fn may_refresh_known_peer(disc: &Discovery) -> bool {
+    !disc.authenticated || disc.address_bound
 }
 
 /// Parses and verifies a discovery packet. Accepts both:
 /// - New format (7 fields): HOPCHAT|username|ip|port|timestamp|ed25519_pub|sig
 /// - Old format (4 fields): HOPCHAT|username|ip|port — flagged unauthenticated
 ///
-/// The claimed IP inside the packet is deliberately ignored: callers get the
-/// source address, which a sender cannot forge.
+/// The address used for routing is always the observed source. The signed
+/// address is compared against it and reported as `address_bound`; callers
+/// must not let an unbound packet move a peer they already know.
 pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discovery> {
     let parts: Vec<&str> = packet_str.split('|').collect();
 
-    let (username, port, authenticated) = match parts.len() {
+    let (username, port, authenticated, address_bound) = match parts.len() {
         7 if parts[0] == "HOPCHAT" => {
             let timestamp: u64 = parts[4].parse().ok()?;
 
@@ -439,6 +468,7 @@ pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discover
                 sanitize_network_username(parts[1])?,
                 parts[3].parse().ok()?,
                 true,
+                parts[2] == src_ip,
             )
         }
         4 if parts[0] == "HOPCHAT" => {
@@ -447,6 +477,7 @@ pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discover
             (
                 sanitize_network_username(parts[1])?,
                 parts[3].parse().ok()?,
+                false,
                 false,
             )
         }
@@ -458,6 +489,7 @@ pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discover
         ip: src_ip.to_string(),
         port,
         authenticated,
+        address_bound,
     })
 }
 
@@ -763,5 +795,68 @@ pub async fn listen_for_messages(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    fn discovery(ip: &str, authenticated: bool, address_bound: bool) -> Discovery {
+        Discovery {
+            username: "alice".to_string(),
+            ip: ip.to_string(),
+            port: 9878,
+            authenticated,
+            address_bound,
+        }
+    }
+
+    #[test]
+    fn forwarded_signed_discovery_cannot_update_a_known_peer() {
+        let forwarded = discovery("192.168.1.66", true, false);
+        assert!(
+            !may_refresh_known_peer(&forwarded),
+            "a signed packet replayed from another host must not move a peer"
+        );
+    }
+
+    #[test]
+    fn address_bound_signed_discovery_can_update_a_known_peer() {
+        let direct = discovery("192.168.1.42", true, true);
+        assert!(may_refresh_known_peer(&direct));
+    }
+
+    #[test]
+    fn signed_discovery_records_whether_the_claim_matches_the_source() {
+        let username = format!("hopchat_test_{}", std::process::id());
+        let identity = LocalIdentity::load_or_create(&username);
+        let packet = create_signed_discovery("alice", "192.168.1.42", 9878, &identity);
+
+        let from_claimed = parse_discovery_packet(&packet, "192.168.1.42")
+            .expect("packet from the advertised address must parse");
+        assert!(from_claimed.authenticated);
+        assert!(from_claimed.address_bound);
+
+        let forwarded = parse_discovery_packet(&packet, "192.168.1.66")
+            .expect("a forwarded packet is still structurally valid");
+        assert!(forwarded.authenticated);
+        assert!(
+            !forwarded.address_bound,
+            "the signed address does not match the source"
+        );
+
+        if let Some(home) = dirs::home_dir() {
+            let _ = std::fs::remove_file(home.join(format!(".hopchat_id_{}", username)));
+        }
+    }
+
+    #[test]
+    fn legacy_unsigned_discovery_remains_unauthenticated_and_unbound() {
+        let disc = parse_discovery_packet("HOPCHAT|bob|192.168.1.20|9878", "192.168.1.20")
+            .expect("legacy packet must parse");
+        assert!(!disc.authenticated);
+        assert!(!disc.address_bound);
+        assert_eq!(disc.port, 9878);
     }
 }
