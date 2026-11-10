@@ -38,21 +38,15 @@ impl TrustDb {
             Ok(j) => j,
             Err(_) => return,
         };
+        let _ = crate::user::write_private_file(&path, json.as_bytes());
+    }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create(true).truncate(true).mode(0o600);
-            if let Ok(mut file) = opts.open(&path) {
-                let _ = std::io::Write::write_all(&mut file, json.as_bytes());
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = std::fs::write(&path, json);
-        }
+    /// Returns the pinned Ed25519 public key for `username`, if one exists.
+    ///
+    /// Read-only on purpose: a caller that only wants to *check* a key against
+    /// the pin must not be able to establish a new pin as a side effect.
+    pub fn pinned_key(&self, username: &str) -> Option<&str> {
+        self.known_peers.get(username).map(|k| k.as_str())
     }
 
     /// Verifies a peer's identity against the trust database.
@@ -112,5 +106,22 @@ impl TrustDb {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".hopchat_trust_db")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_key_lookup_never_creates_a_pin() {
+        let mut db = TrustDb::default();
+        assert!(db.pinned_key("alice").is_none());
+        // Looking must not add an entry…
+        assert!(db.known_peers.is_empty());
+
+        db.known_peers.insert("alice".into(), "aa".repeat(32));
+        assert_eq!(db.pinned_key("alice"), Some("aa".repeat(32).as_str()));
+        assert!(db.pinned_key("bob").is_none());
     }
 }

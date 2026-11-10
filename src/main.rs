@@ -1,5 +1,5 @@
 // =============================================================================
-// HOPCHAT v2.3.0 — Main Entry Point
+// HOPCHAT v2.4.0 — Main Entry Point
 // =============================================================================
 //
 // Orchestrates all subsystems:
@@ -91,7 +91,7 @@ pub struct AppState {
 /// Sanitizes input to prevent pipe-injection attacks on the discovery protocol.
 fn prompt_username() -> String {
     print!("\n  ╔══════════════════════════════════╗\n");
-    print!("  ║        HOPCHAT v2.3.0            ║\n");
+    print!("  ║        HOPCHAT v2.4.0            ║\n");
     print!("  ╠══════════════════════════════════╣\n");
     print!("  ║  Enter your username:            ║\n");
     print!("  ╚══════════════════════════════════╝\n");
@@ -190,6 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         keypair: local_keypair.clone(),
         peers: peers.clone(),
         peer_keys: peer_keys.clone(),
+        trust_db: trust_db.clone(),
     });
 
     // UDP discovery: broadcast our signed presence
@@ -286,13 +287,12 @@ fn spawn_subnet_scan(state: &AppState) {
         &state.identity,
     );
 
-    // Key exchange payload
-    let pub_x25519 = state.keypair.public_key_hex();
-    let pub_ed25519 = state.identity.public_key_hex();
-    let sig = state.identity.sign_payload(pub_x25519.as_bytes());
-    let key_payload = format!(
-        "HOPCHAT_KEY|{}|{}|{}|{}",
-        state.username, pub_x25519, pub_ed25519, sig
+    // Key exchange payload — signed over username + key, so it cannot be
+    // replayed under a different name.
+    let key_payload = messaging::build_key_packet(
+        &state.username,
+        &state.keypair.public_key_hex(),
+        &state.identity,
     );
 
     let disc_port = discovery::DISCOVERY_PORT;
@@ -634,13 +634,10 @@ async fn run_event_loop(
                         } else {
                             // No session key — initiate Key Exchange
                             if let Ok(addr) = peer.socket_addr() {
-                                let pub_x25519 = state.keypair.public_key_hex();
-                                let pub_ed25519 = state.identity.public_key_hex();
-                                let sig = state.identity.sign_payload(pub_x25519.as_bytes());
-
-                                let handshake_packet = format!(
-                                    "HOPCHAT_KEY|{}|{}|{}|{}",
-                                    state.username, pub_x25519, pub_ed25519, sig
+                                let handshake_packet = messaging::build_key_packet(
+                                    &state.username,
+                                    &state.keypair.public_key_hex(),
+                                    &state.identity,
                                 );
                                 
                                 let socket_clone = state.outbound_socket.clone();

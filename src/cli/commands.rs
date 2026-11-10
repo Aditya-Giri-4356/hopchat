@@ -181,13 +181,11 @@ pub async fn handle_command(state: &mut AppState, input: &str) -> CommandResult 
                         &state.username, &my_ip, state.chat_port, &state.identity,
                     );
 
-                    // Key exchange handshake payload
-                    let pub_x25519 = state.keypair.public_key_hex();
-                    let pub_ed25519 = state.identity.public_key_hex();
-                    let sig = state.identity.sign_payload(pub_x25519.as_bytes());
-                    let key_payload = format!(
-                        "HOPCHAT_KEY|{}|{}|{}|{}",
-                        state.username, pub_x25519, pub_ed25519, sig
+                    // Key exchange handshake payload (username is signed too)
+                    let key_payload = messaging::build_key_packet(
+                        &state.username,
+                        &state.keypair.public_key_hex(),
+                        &state.identity,
                     );
 
                     let peer_chat_port = match explicit_port {

@@ -1,6 +1,6 @@
 # HOPCHAT
 
-**Status: Production-Hardened (v2.3.0)**
+**Status: Production-Hardened (v2.4.0)**
 
 
 HOPCHAT is a lightweight, decentralized, deeply encrypted terminal messenger written in Rust. It enables real-time peer-to-peer texting across local networks, isolated WiFi environments, and phone hotspots—no internet access required.
@@ -130,7 +130,7 @@ cargo run --release
 
 ### Command-Line Arguments
 
-HopChat v2.3.0 supports zero-dependency CLI arguments:
+HopChat v2.4.0 supports zero-dependency CLI arguments:
 
 ```bash
 Usage: hopchat [OPTIONS]
@@ -206,13 +206,13 @@ Inside the chat buffer, you can execute special slash commands:
 ## Security Model
 
 1. **Identity:** At first boot, HOPCHAT generates a persistent Ed25519 identity key saved to `~/.hopchat_id_<username>` (`0600` permissions on Unix).
-2. **Key Agreement:** Sessions use ephemeral X25519 DH exchange. Handshakes are signed with the Ed25519 identity to prevent spoofing and MITM.
+2. **Key Agreement:** Sessions use ephemeral X25519 DH exchange. Handshakes are signed with the Ed25519 identity over the username and the X25519 key together, so a captured handshake cannot be replayed under another name, and low-order peer keys that would force an all-zero shared secret are rejected. The signature format changed in v2.4.0 — all devices must be updated together to complete a handshake.
 3. **Persistent TOFU Trust DB:** Discovered peer public key fingerprints are pinned in `~/.hopchat_trust_db`. If an existing peer's key changes on subsequent launches, the connection is rejected and flagged as a potential MITM attack.
-4. **Signed Discovery:** Discovery packets contain an Ed25519 signature and timestamp to prevent broadcast spoofing.
+4. **Signed Discovery:** Discovery packets contain an Ed25519 signature, a timestamp, and the sender's address. An announcement claiming a username you already trust must carry that peer's pinned key, and only a packet whose signed address matches its source can move a peer you already know, which stops a replayed broadcast from redirecting a conversation.
 5. **Replay Protection:** Incoming messages are verified against a per-peer 64-message sliding sequence bitmask, discarding duplicates and expired packets.
 6. **Constant-Time Verification:** All cryptographic fingerprint comparisons use constant-time algorithms (`ct_eq`) to eliminate timing side-channels.
 7. **Encryption:** Payloads are XChaCha20-Poly1305 encrypted. All routing metadata is hidden inside the cipher.
-8. **Resilience:** Built-in IP rate limiting prevents DoS flood attacks.
+8. **Resilience:** Built-in per-IP rate limiting covers both the chat port and the discovery port, so a flood cannot turn into unbounded signature checks, peer-table entries or DNS lookups.
 
 ---
 

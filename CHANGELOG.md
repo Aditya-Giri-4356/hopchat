@@ -2,6 +2,38 @@
 
 ---
 
+## v2.4.0 — Handshake Authentication, TOFU Pinning on Discovery, Rate Limits
+
+A security release. It changes the handshake signature format, so **all devices must be updated together** — a v2.4.0 node will not complete a key exchange with a v2.3.0 node.
+
+### 🔒 Security Fixes
+
+#### Handshake signature did not cover the username
+* **Problem:** A `HOPCHAT_KEY` packet signed only the sender's ephemeral X25519 public key. The username and the Ed25519 public key travelled beside the signature, uncovered. Anyone who captured a valid handshake could resend it with a different username and it still verified — impersonation of any peer.
+* **Fix:** The signed payload is now `HOPCHAT_KEY|<username>|<x25519_pub>`. Verification (`verify_key_packet`) covers both fields, and every sender builds packets through `build_key_packet`.
+
+#### Discovery bypassed the TOFU pin
+* **Problem:** An announcement only had to be self-consistently signed — by *any* key. The address-binding check stopped a replayed packet from moving a known peer, but a fresh, correctly addressed packet signed by an attacker's own key could still claim an already-known username.
+* **Fix:** A signed announcement for a username with a stored pin must be signed by that same key (`TrustDb::pinned_key`, read-only), otherwise it is dropped. Unknown usernames are still pinned on first contact, which is what TOFU is.
+
+#### Low-order X25519 keys accepted
+* **Problem:** `derive_session_key` accepted any 32 bytes. A small-order peer key collapses the Diffie-Hellman output to the all-zero shared secret, which the peer already knows — they pick the session key instead of deriving it.
+* **Fix:** All-zero shared secrets are rejected before the SHA-256 step.
+
+#### Discovery listener had no rate limit
+* **Problem:** Port 9877 accepted unlimited packets from any source. Each new username cost a signature check, a trust-db read, a peer-table entry and a spawned DNS task — a cheap flood amplified into sustained work.
+* **Fix:** The per-source token bucket used by the chat listener now applies there too, and the handshake retry task is skipped for peers that already have a session.
+
+#### Identity and trust files were only 0600 at creation
+* **Problem:** `OpenOptions::mode(0o600)` applies when the file is created. A file left behind with wider permissions stayed readable by other local users, exposing the long-term signing seed.
+* **Fix:** `user::write_private_file` sets the mode on every write, for both `~/.hopchat_id_<username>` and `~/.hopchat_trust_db`.
+
+### ✅ Tests
+
+New unit tests cover key-packet signature binding, discovery pin matching, address binding, replay-window behaviour, low-order key rejection, DH agreement, AEAD round-trip and tamper rejection, and the file-permission clamp.
+
+---
+
 ## v2.1.1 — iSH Illegal Instruction Fix (SSE2 Removal)
 
 HopChat v2.1.0 binaries crashed immediately on iSH with `Illegal instruction`. This patch completely eliminates SSE/SSE2 instructions from the compiled binary.

@@ -59,7 +59,7 @@ pub fn render_ui(
 
 /// Renders the top header bar.
 fn render_header(frame: &mut Frame, area: Rect) {
-    let header = Paragraph::new(" HOPCHAT v2.3.0")
+    let header = Paragraph::new(" HOPCHAT v2.4.0")
         .style(
             Style::default()
                 .fg(Color::Cyan)

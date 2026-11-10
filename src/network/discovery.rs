@@ -13,16 +13,18 @@
 //   listen_for_peers()   — binds to DISCOVERY_PORT (9877) to receive broadcasts.
 //                          Falls back gracefully if bind fails (iSH).
 //
-// Packet format (v2.3.0):
+// Packet format (v2.4.0):
 //   HOPCHAT|username|ip|port|timestamp|ed25519_pub|signature
 //
 // Backward compatibility: listen_for_peers() also accepts the old 4-field
 // format (HOPCHAT|username|ip|port) from v2.2.0 clients.
 
-use crate::network::messaging::{self, DiscoveryCtx};
+use crate::network::messaging::{self, DiscoveryCtx, TokenBucket};
 use crate::user::identity::LocalIdentity;
-use std::net::SocketAddr;
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::time::{interval, Duration};
 
@@ -136,9 +138,31 @@ pub async fn listen_for_peers(
         Err(_) => UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)).await?,
     };
 
+    // This port takes unauthenticated input from the whole LAN. Every packet
+    // costs a signature check, a trust-db read and possibly a peer-table entry,
+    // so the same per-source token bucket the chat listener uses applies here.
+    let mut rate_limits: HashMap<IpAddr, TokenBucket> = HashMap::new();
+    let mut rate_limit_order: VecDeque<IpAddr> = VecDeque::new();
+    const RATE_LIMIT_CAP: usize = 4096;
+
     let mut buf = [0u8; 4096];
     loop {
         if let Ok((len, src_addr)) = socket.recv_from(&mut buf).await {
+            let ip = src_addr.ip();
+
+            if !rate_limits.contains_key(&ip) {
+                while rate_limit_order.len() >= RATE_LIMIT_CAP {
+                    if let Some(evict_ip) = rate_limit_order.pop_front() {
+                        rate_limits.remove(&evict_ip);
+                    }
+                }
+                rate_limits.insert(ip, TokenBucket::new(200, 100));
+                rate_limit_order.push_back(ip);
+            }
+            if !rate_limits.get_mut(&ip).unwrap().try_consume(Instant::now()) {
+                continue; // Drop: rate limit exceeded
+            }
+
             if let Ok(text) = std::str::from_utf8(&buf[..len]) {
                 messaging::handle_discovery(text.trim(), src_addr, &ctx).await;
             }

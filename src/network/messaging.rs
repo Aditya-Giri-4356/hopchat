@@ -111,7 +111,7 @@ impl ReplayWindow {
 
 /// Integer-based token bucket for DoS mitigation.
 /// Uses millitokens (×1000) for sub-token accumulation without floating-point.
-struct TokenBucket {
+pub struct TokenBucket {
     tokens_milli: u64,
     capacity_milli: u64,
     refill_per_us: u64,
@@ -119,7 +119,7 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
-    fn new(max_tokens: u64, refill_per_second: u64) -> Self {
+    pub fn new(max_tokens: u64, refill_per_second: u64) -> Self {
         Self {
             tokens_milli: max_tokens * 1000,
             capacity_milli: max_tokens * 1000,
@@ -128,7 +128,7 @@ impl TokenBucket {
         }
     }
 
-    fn try_consume(&mut self, now: Instant) -> bool {
+    pub fn try_consume(&mut self, now: Instant) -> bool {
         let elapsed_us = now.duration_since(self.last_update).as_micros() as u64;
         self.last_update = now;
         let added = elapsed_us.saturating_mul(self.refill_per_us) / 1_000_000;
@@ -232,6 +232,47 @@ pub fn create_signed_discovery(
     format!("{}|{}|{}", payload, ed_pub, sig)
 }
 
+/// The exact bytes a peer signs to introduce its ephemeral X25519 key.
+///
+/// The username is inside the signed payload on purpose. Signing the key alone
+/// lets anyone capture a valid `HOPCHAT_KEY` packet off the wire and replay it
+/// under a different username, because that field is then not covered by the
+/// signature.
+pub fn key_signature_payload(username: &str, x25519_pub_hex: &str) -> Vec<u8> {
+    format!("HOPCHAT_KEY|{}|{}", username, x25519_pub_hex).into_bytes()
+}
+
+/// Verifies a key-exchange packet's signature over username and key.
+pub fn verify_key_packet(
+    username: &str,
+    x25519_pub_hex: &str,
+    ed25519_pub_hex: &str,
+    sig_hex: &str,
+) -> bool {
+    LocalIdentity::verify_signature(
+        ed25519_pub_hex,
+        &key_signature_payload(username, x25519_pub_hex),
+        sig_hex,
+    )
+}
+
+/// Builds a signed key-exchange packet:
+/// `HOPCHAT_KEY|username|x25519_pub|ed25519_pub|signature`
+pub fn build_key_packet(
+    username: &str,
+    x25519_pub_hex: &str,
+    identity: &LocalIdentity,
+) -> String {
+    let sig = identity.sign_payload(&key_signature_payload(username, x25519_pub_hex));
+    format!(
+        "HOPCHAT_KEY|{}|{}|{}|{}",
+        username,
+        x25519_pub_hex,
+        identity.public_key_hex(),
+        sig
+    )
+}
+
 /// Everything needed to answer a discovery announcement.
 ///
 /// Bundled so the port-9877 listener and the chat-port listener can share one
@@ -247,20 +288,15 @@ pub struct DiscoveryCtx {
     pub keypair: Arc<X25519KeyPair>,
     pub peers: PeerRegistry,
     pub peer_keys: PeerKeyRegistry,
+    /// Pinned identities, so an announcement cannot claim a known username
+    /// with a key we never trusted.
+    pub trust_db: TrustRegistry,
 }
 
 impl DiscoveryCtx {
     /// Builds the key-exchange packet that introduces us to a peer.
     fn key_packet(&self) -> String {
-        let pub_x25519 = self.keypair.public_key_hex();
-        let sig = self.identity.sign_payload(pub_x25519.as_bytes());
-        format!(
-            "HOPCHAT_KEY|{}|{}|{}|{}",
-            self.username,
-            pub_x25519,
-            self.identity.public_key_hex(),
-            sig
-        )
+        build_key_packet(&self.username, &self.keypair.public_key_hex(), &self.identity)
     }
 }
 
@@ -275,6 +311,16 @@ pub async fn handle_discovery(packet_str: &str, src_addr: SocketAddr, ctx: &Disc
     };
     if disc.username == ctx.username {
         return;
+    }
+
+    // A signed packet proves the sender owns *some* identity, not the one we
+    // trust for that username. Without this check anyone on the LAN could
+    // announce themselves as a peer we already know and inherit its entry.
+    {
+        let db = ctx.trust_db.lock().await;
+        if !announcement_matches_pin(&db, &disc) {
+            return;
+        }
     }
 
     // A signed packet proves who wrote it, not where it was sent from. Anyone
@@ -335,7 +381,13 @@ pub async fn handle_discovery(packet_str: &str, src_addr: SocketAddr, ctx: &Disc
     }
 
     // One retry after a short pause, for the case where our greeting and
-    // theirs cross on a busy network and both are dropped.
+    // theirs cross on a busy network and both are dropped. A peer we can
+    // already talk to needs none, and spawning a task per announcement is
+    // exactly the work a flood would amplify.
+    if ctx.peer_keys.lock().await.contains_key(&disc.username) {
+        return;
+    }
+
     let socket = ctx.socket.clone();
     let username = disc.username.clone();
     let peer_keys = ctx.peer_keys.clone();
@@ -424,6 +476,22 @@ pub struct Discovery {
     /// actually came from. A forwarded (replayed) announcement is authentic
     /// but not address-bound, so it cannot be trusted to relocate a peer.
     pub address_bound: bool,
+    /// The signing key advertised by a signed packet, so it can be checked
+    /// against the identity pinned for that username.
+    pub ed25519: Option<String>,
+}
+
+/// Whether a signed announcement is backed by the key we already pinned for
+/// that username.
+///
+/// Unsigned legacy packets carry no key, and an unknown username has nothing
+/// pinned yet, so both are left to the upsert rules. A known username may only
+/// be announced by the identity we trust for it.
+fn announcement_matches_pin(trust_db: &TrustDb, disc: &Discovery) -> bool {
+    match (disc.ed25519.as_ref(), trust_db.pinned_key(&disc.username)) {
+        (Some(advertised), Some(pinned)) => crate::crypto::verify::ct_eq_hex(pinned, advertised),
+        _ => true,
+    }
 }
 
 /// Whether an announcement may update a peer we already have on record.
@@ -446,7 +514,7 @@ fn may_refresh_known_peer(disc: &Discovery) -> bool {
 pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discovery> {
     let parts: Vec<&str> = packet_str.split('|').collect();
 
-    let (username, port, authenticated, address_bound) = match parts.len() {
+    let (username, port, authenticated, address_bound, ed25519) = match parts.len() {
         7 if parts[0] == "HOPCHAT" => {
             let timestamp: u64 = parts[4].parse().ok()?;
 
@@ -469,6 +537,7 @@ pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discover
                 parts[3].parse().ok()?,
                 true,
                 parts[2] == src_ip,
+                Some(parts[5].to_string()),
             )
         }
         4 if parts[0] == "HOPCHAT" => {
@@ -479,6 +548,7 @@ pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discover
                 parts[3].parse().ok()?,
                 false,
                 false,
+                None,
             )
         }
         _ => return None,
@@ -490,6 +560,7 @@ pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discover
         port,
         authenticated,
         address_bound,
+        ed25519,
     })
 }
 
@@ -564,6 +635,7 @@ pub async fn listen_for_messages(
                         keypair: local_keypair.clone(),
                         peers: peer_registry.clone(),
                         peer_keys: peer_keys.clone(),
+                        trust_db: trust_db.clone(),
                     };
                     handle_discovery(packet_str, src_addr, &ctx).await;
 
@@ -599,9 +671,13 @@ pub async fn listen_for_messages(
                             // Verify the signature first. Pinning a key from an
                             // unauthenticated packet would let anyone squat a
                             // username and lock the real owner out of the DB.
-                            if !LocalIdentity::verify_signature(
+                            // The signed payload covers username and key, so a
+                            // captured packet cannot be replayed under a new
+                            // name.
+                            if !verify_key_packet(
+                                &sender_username,
+                                sender_x25519_hex,
                                 sender_ed25519_hex,
-                                sender_x25519_hex.as_bytes(),
                                 sender_signature,
                             ) {
                                 eprintln!(
@@ -678,12 +754,10 @@ pub async fn listen_for_messages(
 
                                 // Send our key back to complete the handshake
                                 if !already_had_key {
-                                    let pub_x25519 = local_keypair.public_key_hex();
-                                    let pub_ed25519 = local_identity.public_key_hex();
-                                    let sig = local_identity.sign_payload(pub_x25519.as_bytes());
-                                    let handshake = format!(
-                                        "HOPCHAT_KEY|{}|{}|{}|{}",
-                                        our_username, pub_x25519, pub_ed25519, sig
+                                    let handshake = build_key_packet(
+                                        &our_username,
+                                        &local_keypair.public_key_hex(),
+                                        &local_identity,
                                     );
                                     let _ = socket.send_to(handshake.as_bytes(), &src_addr).await;
                                 }
@@ -801,6 +875,7 @@ pub async fn listen_for_messages(
 #[cfg(test)]
 mod security_tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn discovery(ip: &str, authenticated: bool, address_bound: bool) -> Discovery {
         Discovery {
@@ -809,6 +884,7 @@ mod security_tests {
             port: 9878,
             authenticated,
             address_bound,
+            ed25519: None,
         }
     }
 
@@ -858,5 +934,68 @@ mod security_tests {
         assert!(!disc.authenticated);
         assert!(!disc.address_bound);
         assert_eq!(disc.port, 9878);
+    }
+
+    // --- Key-exchange signature binding -----------------------------------
+
+    fn signing_key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    #[test]
+    fn key_packet_signature_is_bound_to_the_username() {
+        let key = signing_key(7);
+        let x25519_hex = "ab".repeat(32);
+        let ed_hex = hex::encode(key.verifying_key().to_bytes());
+        let sig = hex::encode(
+            key.sign(&key_signature_payload("alice", &x25519_hex)).to_bytes(),
+        );
+
+        assert!(verify_key_packet("alice", &x25519_hex, &ed_hex, &sig));
+        // The same captured packet must not verify under another name.
+        assert!(!verify_key_packet("mallory", &x25519_hex, &ed_hex, &sig));
+        // A key-only signature is not accepted.
+        let legacy_sig = hex::encode(key.sign(x25519_hex.as_bytes()).to_bytes());
+        assert!(!verify_key_packet("alice", &x25519_hex, &ed_hex, &legacy_sig));
+        // Garbage must not panic or verify.
+        assert!(!verify_key_packet("alice", "zz", "not-a-key", "00"));
+    }
+
+    // --- Discovery pin check ----------------------------------------------
+
+    #[test]
+    fn announcement_must_match_the_pinned_identity() {
+        let mut db = TrustDb::default();
+        let mut disc = discovery("192.168.1.42", true, true);
+        disc.ed25519 = Some("aa".repeat(32));
+
+        // Nothing pinned yet: first contact is allowed to introduce itself.
+        assert!(announcement_matches_pin(&db, &disc));
+
+        db.known_peers.insert("alice".into(), "aa".repeat(32));
+        assert!(announcement_matches_pin(&db, &disc));
+
+        // A different key claiming a pinned username must be refused.
+        db.known_peers.insert("alice".into(), "bb".repeat(32));
+        assert!(!announcement_matches_pin(&db, &disc));
+
+        // Legacy unsigned announcements carry no key to check.
+        disc.ed25519 = None;
+        assert!(announcement_matches_pin(&db, &disc));
+    }
+
+    // --- Replay window ----------------------------------------------------
+
+    #[test]
+    fn replay_window_drops_duplicates_and_old_ids() {
+        let mut window = ReplayWindow::new();
+        assert!(window.check_and_accept(100));
+        assert!(!window.check_and_accept(100), "exact duplicate accepted");
+        assert!(window.check_and_accept(101));
+        assert!(window.check_and_accept(99), "fresh out-of-order id refused");
+        assert!(!window.check_and_accept(99), "replayed id accepted twice");
+        assert!(window.check_and_accept(200));
+        assert!(!window.check_and_accept(100), "windowed id accepted twice");
+        assert!(!window.check_and_accept(10), "expired id accepted");
     }
 }

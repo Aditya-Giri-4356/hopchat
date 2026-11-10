@@ -32,7 +32,7 @@ impl X25519KeyPair {
 
     /// Derives a 32-byte symmetric session key given a peer's hex public key.
     /// Uses X25519 Diffie-Hellman and passes the resulting shared secret
-    /// through SHA-256.
+    /// through SHA-256. Low-order peer keys are rejected.
     pub fn derive_session_key(&self, peer_pub_key_hex: &str) -> Result<[u8; 32], String> {
         // Decode the hex string back to binary
         let peer_bytes = hex::decode(peer_pub_key_hex)
@@ -50,6 +50,14 @@ impl X25519KeyPair {
         // Perform Diffie-Hellman Key Agreement
         let shared_secret = self.secret.diffie_hellman(&peer_public);
 
+        // Reject low-order public keys. A small-order peer key collapses the
+        // X25519 output to an all-zero shared secret — a value the peer already
+        // knows, which would let them pick the session key instead of deriving
+        // it. X25519 has no other failure mode to check.
+        if shared_secret.as_bytes().iter().all(|b| *b == 0) {
+            return Err("Peer public key is a low-order point (all-zero shared secret)".to_string());
+        }
+
         // Hash the resulting secret bytes through SHA-256 to derive a strong symmetric key
         let mut hasher = Sha256::new();
         hasher.update(shared_secret.as_bytes());
@@ -60,5 +68,30 @@ impl X25519KeyPair {
 
         Ok(symmetric_key)
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_sides_derive_the_same_session_key() {
+        let alice = X25519KeyPair::generate();
+        let bob = X25519KeyPair::generate();
+        let alice_key = alice.derive_session_key(&bob.public_key_hex()).unwrap();
+        let bob_key = bob.derive_session_key(&alice.public_key_hex()).unwrap();
+        assert_eq!(alice_key, bob_key);
+    }
+
+    #[test]
+    fn rejects_low_order_and_malformed_public_keys() {
+        let pair = X25519KeyPair::generate();
+
+        // All-zero is the canonical low-order point: DH with it is all zeros.
+        assert!(pair.derive_session_key(&hex::encode([0u8; 32])).is_err());
+        // Wrong length.
+        assert!(pair.derive_session_key(&hex::encode([1u8; 16])).is_err());
+        // Not hex at all.
+        assert!(pair.derive_session_key("nothex").is_err());
+    }
 }
