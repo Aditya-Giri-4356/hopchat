@@ -6,39 +6,59 @@
 // Each function renders one section of the UI into its allocated Rect.
 
 use crate::chat::messages::ChatMessage;
+use crate::network::bluetooth::BleStatus;
 use crate::network::peer_registry::Peer;
 use crate::tui::layout::AppLayout;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
+/// Everything one frame needs to draw the interface.
+pub struct RenderArgs<'a> {
+    pub layout: &'a AppLayout,
+    pub username: &'a str,
+    pub peers: &'a [Peer],
+    pub local_ip: &'a str,
+    pub selected_peer: usize,
+    pub messages: &'a [ChatMessage],
+    pub input: &'a str,
+    pub cursor_pos: usize,
+    pub scanner_visible: bool,
+    pub scanner_index: usize,
+    pub ble: &'a BleStatus,
+    pub lan_enabled: bool,
+}
+
 /// Renders the full HOPCHAT interface.
-pub fn render_ui(
-    frame: &mut Frame,
-    layout: &AppLayout,
-    username: &str,
-    peers: &[Peer],
-    local_ip: &str,
-    selected_peer: usize,
-    messages: &[ChatMessage],
-    input: &str,
-    cursor_pos: usize,
-    scanner_visible: bool,
-    scanner_index: usize,
-) {
+pub fn render_ui(frame: &mut Frame, args: RenderArgs<'_>) {
+    let RenderArgs {
+        layout,
+        username,
+        peers,
+        local_ip,
+        selected_peer,
+        messages,
+        input,
+        cursor_pos,
+        scanner_visible,
+        scanner_index,
+        ble,
+        lan_enabled,
+    } = args;
+
     render_header(frame, layout.header);
     render_friends(frame, layout.friends, peers, local_ip, selected_peer);
-    
+
     // Only render network map and status if they have space (Desktop layout)
     if layout.network_map.width > 0 {
         render_network_map(frame, layout.network_map, username, peers);
     }
     if layout.network_status.width > 0 {
-        render_network_status(frame, layout.network_status, peers);
+        render_network_status(frame, layout.network_status, peers, ble, lan_enabled);
     }
 
     // [UI-MOB-3] Render compact mobile status bar if present
     if let Some(status_rect) = layout.mobile_status {
-        render_mobile_status(frame, status_rect, username, peers);
+        render_mobile_status(frame, status_rect, username, peers, ble, lan_enabled);
     }
 
     // Render Quit button for Mobile layout
@@ -59,7 +79,7 @@ pub fn render_ui(
 
 /// Renders the top header bar.
 fn render_header(frame: &mut Frame, area: Rect) {
-    let header = Paragraph::new(" HOPCHAT v2.4.0")
+    let header = Paragraph::new(" HOPCHAT v2.5.0")
         .style(
             Style::default()
                 .fg(Color::Cyan)
@@ -76,14 +96,11 @@ fn render_header(frame: &mut Frame, area: Rect) {
 /// [UI-MOB-2] Renders the friends list panel with selection highlighting.
 /// Uses green-on-black with a `>>` marker for selected items — readable
 /// on both light and dark terminal backgrounds.
-fn render_friends(
-    frame: &mut Frame,
-    area: Rect,
-    peers: &[Peer],
-    local_ip: &str,
-    selected: usize,
-) {
-    let connected = peers.iter().filter(|p| p.connected).count();
+fn render_friends(frame: &mut Frame, area: Rect, peers: &[Peer], local_ip: &str, selected: usize) {
+    let connected = peers
+        .iter()
+        .filter(|p| p.connected || p.ble_connected)
+        .count();
 
     let items: Vec<ListItem> = if peers.is_empty() {
         vec![
@@ -104,7 +121,7 @@ fn render_friends(
                 // Filled dot = encrypted session, hollow = seen but not
                 // connected, dim = offline. The name is the thing to read;
                 // the address is small print.
-                let (marker, name_style) = if peer.connected {
+                let (marker, name_style) = if peer.connected || peer.ble_connected {
                     ("●", Style::default().fg(Color::Green))
                 } else if peer.online {
                     ("○", Style::default().fg(Color::Yellow))
@@ -112,7 +129,16 @@ fn render_friends(
                     ("·", Style::default().fg(Color::DarkGray))
                 };
 
-                let text = format!("{} {}", marker, peer.username);
+                let link = if peer.ble_connected {
+                    if peer.connected {
+                        " [bt+lan]"
+                    } else {
+                        " [bt]"
+                    }
+                } else {
+                    ""
+                };
+                let text = format!("{} {}{}", marker, peer.username, link);
                 let style = if i == selected {
                     Style::default()
                         .fg(Color::Black)
@@ -121,8 +147,12 @@ fn render_friends(
                 } else {
                     name_style
                 };
-                ListItem::new(if i == selected { format!(">> {}", text) } else { format!("   {}", text) })
-                    .style(style)
+                ListItem::new(if i == selected {
+                    format!(">> {}", text)
+                } else {
+                    format!("   {}", text)
+                })
+                .style(style)
             })
             .collect()
     };
@@ -131,7 +161,11 @@ fn render_friends(
     let list = List::new(items).block(
         Block::default()
             .title(title)
-            .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            .title_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     );
@@ -139,12 +173,7 @@ fn render_friends(
 }
 
 /// Renders the network map placeholder panel.
-fn render_network_map(
-    frame: &mut Frame,
-    area: Rect,
-    username: &str,
-    peers: &[Peer],
-) {
+fn render_network_map(frame: &mut Frame, area: Rect, username: &str, peers: &[Peer]) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
 
@@ -152,12 +181,18 @@ fn render_network_map(
     let you_label = format!("  YOU ({})", username);
     lines.push(Line::from(Span::styled(
         you_label,
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )));
 
     for peer in peers {
-        let (label, style) = if peer.connected {
-            ("connected", Color::Green)
+        let (label, style) = if peer.ble_connected && peer.connected {
+            ("connected (LAN + BLE)", Color::Green)
+        } else if peer.ble_connected {
+            ("connected (BLE)", Color::Green)
+        } else if peer.connected {
+            ("connected (LAN)", Color::Green)
         } else if peer.online {
             ("seen", Color::Yellow)
         } else {
@@ -185,7 +220,11 @@ fn render_network_map(
     let map = Paragraph::new(lines).block(
         Block::default()
             .title(" NETWORK MAP ")
-            .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            .title_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     );
@@ -193,17 +232,24 @@ fn render_network_map(
 }
 
 /// [UI-DESK-2] Renders the network status bar with honest reporting.
-/// WiFi count previously duplicated total node count. Now shows actual
-/// peer count and connection status. BLE shows "--" until implemented.
+/// Wi-Fi and Bluetooth are separate transports now, so each gets its own
+/// state instead of a placeholder.
 fn render_network_status(
     frame: &mut Frame,
     area: Rect,
     peers: &[Peer],
+    ble: &BleStatus,
+    lan_enabled: bool,
 ) {
     let peer_count = peers.len();
-    let connected = peers.iter().filter(|p| p.connected).count();
+    let connected = peers
+        .iter()
+        .filter(|p| p.connected || p.ble_connected)
+        .count();
+    let ble_links = peers.iter().filter(|p| p.ble_connected).count();
+    let range = if ble_links > 0 { "LAN + BLE" } else { "LAN" };
     let status_text = format!(
-        " {}  |  Connected: {}  |  Nearby: {}  |  BLE: --  |  Range: LAN",
+        " {} | Connected {} | Nearby {} | Wi-Fi {} | BLE {} | {}",
         if connected > 0 {
             "CONNECTED"
         } else if peer_count > 0 {
@@ -212,7 +258,10 @@ fn render_network_status(
             "SCANNING"
         },
         connected,
-        peer_count
+        peer_count,
+        if lan_enabled { "on" } else { "off" },
+        ble.summary(),
+        range
     );
 
     let status = Paragraph::new(status_text)
@@ -220,7 +269,11 @@ fn render_network_status(
         .block(
             Block::default()
                 .title(" NETWORK STATUS ")
-                .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                .title_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
@@ -239,18 +292,18 @@ fn render_chat(
     selected_peer: usize,
 ) {
     // Determine chat title based on selected peer
-    let chat_title = if peers.is_empty() {
-        " CHAT ".to_string()
-    } else {
-        let peer_name = &peers[selected_peer.min(peers.len().saturating_sub(1))].username;
-        format!(" CHAT : PRIVATE({}) ", peer_name)
+    let chat_title = match peers.get(selected_peer.min(peers.len().saturating_sub(1))) {
+        Some(peer) => format!(" CHAT : PRIVATE({}) ", peer.username),
+        None => " CHAT ".to_string(),
     };
 
     // Filter messages relevant to the selected conversation
     // Build sorted indices to avoid cloning the entire messages Vec every frame
     let mut indices: Vec<usize> = (0..messages.len()).collect();
     indices.sort_by(|&a, &b| {
-        messages[a].timestamp.cmp(&messages[b].timestamp)
+        messages[a]
+            .timestamp
+            .cmp(&messages[b].timestamp)
             .then_with(|| messages[a].id.cmp(&messages[b].id))
     });
 
@@ -321,7 +374,11 @@ fn render_chat(
         .block(
             Block::default()
                 .title(chat_title)
-                .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                .title_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
@@ -337,10 +394,11 @@ fn render_input(frame: &mut Frame, area: Rect, input: &str, cursor_pos: usize) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
-        
-    let text = ratatui::text::Text::from(vec![
-        ratatui::text::Line::from(vec![Span::styled(format!("> {}", input), style)]),
-    ]);
+
+    let text = ratatui::text::Text::from(vec![ratatui::text::Line::from(vec![Span::styled(
+        format!("> {}", input),
+        style,
+    )])]);
 
     let input_widget = Paragraph::new(text).block(block);
     frame.render_widget(input_widget, area);
@@ -354,25 +412,40 @@ fn render_input(frame: &mut Frame, area: Rect, input: &str, cursor_pos: usize) {
 
 /// Renders the mobile-specific Quit button
 fn render_quit_button(frame: &mut Frame, area: Rect) {
-    let text = ratatui::text::Text::from(vec![
-        ratatui::text::Line::from(vec![Span::styled(
-            "   [ QUIT ]   ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        )]),
-    ]);
+    let text = ratatui::text::Text::from(vec![ratatui::text::Line::from(vec![Span::styled(
+        "   [ QUIT ]   ",
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    )])]);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red))
         .style(Style::default().bg(Color::Black));
-        
-    let p = Paragraph::new(text).block(block).alignment(Alignment::Center);
+
+    let p = Paragraph::new(text)
+        .block(block)
+        .alignment(Alignment::Center);
     frame.render_widget(p, area);
 }
 
 /// [UI-MOB-3] Renders a compact mobile status bar showing username and peer count.
-fn render_mobile_status(frame: &mut Frame, area: Rect, username: &str, peers: &[Peer]) {
-    let status_text = format!(" user: {}  |  peers: {}", username, peers.len());
+fn render_mobile_status(
+    frame: &mut Frame,
+    area: Rect,
+    username: &str,
+    peers: &[Peer],
+    ble: &BleStatus,
+    lan_enabled: bool,
+) {
+    // Narrow screens: keep the labels terse. "bt" and "wifi" are enough to
+    // tell whether each radio is on without wrapping the bar.
+    let status_text = format!(
+        " {} | peers {} | wifi {} | bt {}",
+        username,
+        peers.len(),
+        if lan_enabled { "on" } else { "off" },
+        ble.summary()
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
@@ -387,12 +460,12 @@ fn render_mobile_status(frame: &mut Frame, area: Rect, username: &str, peers: &[
 /// and a scroll position indicator is shown when the list exceeds visible height.
 fn render_scanner_popup(frame: &mut Frame, peers: &[Peer], local_ip: &str, selected_index: usize) {
     let area = frame.size();
-    
+
     // [UI-MOB-6] Scale popup to terminal width with 2-char padding on each side, max 60
     let popup_width = area.width.saturating_sub(4).min(60);
     // [UI-DESK-6] Clamp popup height to available space with breathing room
     let popup_height = area.height.saturating_sub(4).min(15);
-    
+
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -405,13 +478,20 @@ fn render_scanner_popup(frame: &mut Frame, peers: &[Peer], local_ip: &str, selec
 
     // [UI-DESK-6] Footer with scroll position indicator
     let visible_items = popup_height.saturating_sub(4) as usize; // borders + header + footer padding
-    let connected = peers.iter().filter(|p| p.connected).count();
+    let connected = peers
+        .iter()
+        .filter(|p| p.connected || p.ble_connected)
+        .count();
     let footer = if peers.len() > visible_items {
         format!(" [{}/{}] Enter connects ", selected_index + 1, peers.len())
     } else if peers.is_empty() {
         format!(" You are {} — searching... ", local_ip)
     } else {
-        format!(" {} connected of {}  |  Enter connects ", connected, peers.len())
+        format!(
+            " {} connected of {}  |  Enter connects ",
+            connected,
+            peers.len()
+        )
     };
 
     let block = Block::default()
@@ -422,36 +502,43 @@ fn render_scanner_popup(frame: &mut Frame, peers: &[Peer], local_ip: &str, selec
 
     let mut items: Vec<ListItem> = if peers.is_empty() {
         vec![
-            ListItem::new("  Looking for people nearby...")
-                .style(Style::default().fg(Color::Gray)),
+            ListItem::new("  Looking for people nearby...").style(Style::default().fg(Color::Gray)),
             ListItem::new("  Same Wi-Fi or hotspot is all it takes.")
                 .style(Style::default().fg(Color::DarkGray)),
         ]
     } else {
-        peers.iter().enumerate().map(|(i, peer)| {
-            let (marker, state) = if peer.connected {
-                ("●", "connected")
-            } else if peer.online {
-                ("○", "connecting")
-            } else {
-                ("·", "offline")
-            };
+        peers
+            .iter()
+            .enumerate()
+            .map(|(i, peer)| {
+                let (marker, state) = if peer.ble_connected && peer.connected {
+                    ("●", "connected lan+bt")
+                } else if peer.ble_connected {
+                    ("●", "connected bt")
+                } else if peer.connected {
+                    ("●", "connected")
+                } else if peer.online {
+                    ("○", "connecting")
+                } else {
+                    ("·", "offline")
+                };
 
-            let display_str = format!(" {} {}  [{}]", marker, peer.username, state);
-            let mut style = Style::default().fg(if peer.connected {
-                Color::Green
-            } else if peer.online {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            });
-            
-            if i == selected_index {
-                style = style.bg(Color::Blue).add_modifier(Modifier::BOLD);
-            }
-            
-            ListItem::new(display_str).style(style)
-        }).collect()
+                let display_str = format!(" {} {}  [{}]", marker, peer.username, state);
+                let mut style = Style::default().fg(if peer.connected || peer.ble_connected {
+                    Color::Green
+                } else if peer.online {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                });
+
+                if i == selected_index {
+                    style = style.bg(Color::Blue).add_modifier(Modifier::BOLD);
+                }
+
+                ListItem::new(display_str).style(style)
+            })
+            .collect()
     };
 
     // [UI-DESK-6] Add footer as last list item (compatible with all ratatui versions)

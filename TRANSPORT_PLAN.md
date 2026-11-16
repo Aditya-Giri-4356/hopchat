@@ -6,6 +6,15 @@ This is a working document, not a spec. It'll change as hardware gets tested. La
 serious pass: October 2026, after finally sitting down and counting how many ways a
 packet can actually leave a device.
 
+## Status (November 2026)
+
+The BLE GATT baseline is in the app for macOS and Linux: both GATT roles, a signed
+introduction, shared TOFU/session/replay state with UDP, fragmentation, heartbeats, and
+UDP fallback. It still carries the existing hex envelope, so throughput is well below what
+the radio can do — that is the v3 envelope's problem, not a new transport. iSH has no
+Bluetooth hardware exposed to Linux userland, so the backend is compiled out for the
+i586 build and the UI reports Bluetooth as unavailable.
+
 ---
 
 ## Why bother
@@ -86,7 +95,7 @@ labelled, off by default.
 
 | Medium | Range | Throughput | Where it works | Take |
 |---|---|---|---|---|
-| BLE GATT (write-no-response + notify) | 10–30 m | 20–80 KB/s | everything | **Phase 4.** The universal baseline |
+| BLE GATT (write-no-response + notify) | 10–30 m | 20–80 KB/s | macOS, Linux (iSH: no radio) | **Implemented.** The universal baseline |
 | BLE L2CAP CoC | 10–30 m | 100s KB/s | everything | Phase 4.5. Fast path, kernel-side flow control |
 | BLE advertising, never connecting | 10–30 m | ~28 B, zero in background | everything | Discovery hint only, never data |
 | Classic RFCOMM / SPP | 10–30 m | 150–250 KB/s | Linux, Android — **not iOS** | Phase 7. Optional fast pipe |

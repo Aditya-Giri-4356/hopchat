@@ -22,23 +22,45 @@ pub struct TrustDb {
 
 impl TrustDb {
     /// Loads the trust database from disk, or returns an empty one if the
-    /// file doesn't exist or is corrupt.
+    /// file doesn't exist or is corrupt. Corruption is reported: starting
+    /// with an empty pin set silently would be a security-relevant surprise.
     pub fn load() -> Self {
         let path = Self::db_path();
         match std::fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(db) => db,
+                Err(e) => {
+                    eprintln!(
+                        "[hopchat] trust database {} is corrupt ({}); starting with no pinned keys",
+                        path.display(),
+                        e
+                    );
+                    Self::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => {
+                eprintln!(
+                    "[hopchat] could not read trust database {}: {}; starting with no pinned keys",
+                    path.display(),
+                    e
+                );
+                Self::default()
+            }
         }
     }
 
     /// Saves the trust database to disk with restrictive permissions.
-    pub fn save(&self) {
+    ///
+    /// Returns an error instead of silently losing a newly pinned key when
+    /// the disk is full or the home directory is not writable.
+    pub fn save(&self) -> Result<(), String> {
         let path = Self::db_path();
-        let json = match serde_json::to_string_pretty(self) {
-            Ok(j) => j,
-            Err(_) => return,
-        };
-        let _ = crate::user::write_private_file(&path, json.as_bytes());
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("could not serialize trust database: {}", e))?;
+        crate::user::write_private_file(&path, json.as_bytes())
+            .map_err(|e| format!("could not write {}: {}", path.display(), e))?;
+        Ok(())
     }
 
     /// Returns the pinned Ed25519 public key for `username`, if one exists.
@@ -72,8 +94,11 @@ impl TrustDb {
             matches
         } else {
             // First contact — pin this identity
-            self.known_peers.insert(username.to_string(), ed25519_pub_hex.to_string());
-            self.save();
+            self.known_peers
+                .insert(username.to_string(), ed25519_pub_hex.to_string());
+            if let Err(e) = self.save() {
+                eprintln!("[hopchat] failed to persist a pinned key: {}", e);
+            }
             true
         }
     }
@@ -97,7 +122,9 @@ impl TrustDb {
     pub fn unpin(&mut self, username: &str) -> bool {
         let removed = self.known_peers.remove(username).is_some();
         if removed {
-            self.save();
+            if let Err(e) = self.save() {
+                eprintln!("[hopchat] failed to persist key removal: {}", e);
+            }
         }
         removed
     }

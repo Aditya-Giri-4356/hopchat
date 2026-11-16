@@ -41,7 +41,7 @@ static NEXT_MESSAGE_ID: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(seed_messa
 #[cfg(not(target_pointer_width = "64"))]
 static NEXT_MESSAGE_ID: Lazy<Mutex<u64>> = Lazy::new(|| Mutex::new(seed_message_id()));
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Represents a single chat message between peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +107,7 @@ impl ChatMessage {
         let parts: Vec<&str> = text.splitn(2, '|').collect();
         if parts.len() == 2 && parts[0] == "HOPCHAT_MSG" {
             let ciphertext_hex = parts[1];
-            
+
             // Attempt to decrypt; drop packet if it fails authentication
             // (e.g. if we are trial-decrypting with the wrong peer key)
             if let Ok(json_payload) = encryption::decrypt_message(key, ciphertext_hex) {
@@ -119,4 +119,3 @@ impl ChatMessage {
         None
     }
 }
-

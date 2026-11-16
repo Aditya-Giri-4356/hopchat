@@ -10,10 +10,10 @@
 
 use crate::chat::messages::ChatMessage;
 use crate::crypto::key_exchange::X25519KeyPair;
+use crate::network::discovery::sanitize_network_username;
 use crate::network::peer_registry::{
     mark_connected, mark_reachable, upsert_peer, PeerRegistry, Upsert,
 };
-use crate::network::discovery::sanitize_network_username;
 use crate::user::identity::LocalIdentity;
 use crate::user::trust_db::TrustDb;
 use std::collections::{HashMap, VecDeque};
@@ -62,7 +62,11 @@ pub struct ReplayWindow {
 
 impl ReplayWindow {
     pub fn new() -> Self {
-        Self { max_id: 0, bitmap: 0, initialized: false }
+        Self {
+            max_id: 0,
+            bitmap: 0,
+            initialized: false,
+        }
     }
 
     /// Returns true if this ID is new (not a replay). Updates state on accept.
@@ -105,6 +109,14 @@ impl ReplayWindow {
     }
 }
 
+/// Both directions share one symmetric key, so a reflected datagram decrypts
+/// perfectly and looks like a message from the peer. The routing fields inside
+/// the ciphertext are the only distinction: the message must be addressed to
+/// us, and it must not be one we sent.
+fn message_is_for_us(msg: &ChatMessage, peer_username: &str, our_username: &str) -> bool {
+    msg.sender == peer_username && msg.receiver == our_username && msg.sender != our_username
+}
+
 // =============================================================================
 // Rate Limiting
 // =============================================================================
@@ -132,7 +144,10 @@ impl TokenBucket {
         let elapsed_us = now.duration_since(self.last_update).as_micros() as u64;
         self.last_update = now;
         let added = elapsed_us.saturating_mul(self.refill_per_us) / 1_000_000;
-        self.tokens_milli = self.tokens_milli.saturating_add(added).min(self.capacity_milli);
+        self.tokens_milli = self
+            .tokens_milli
+            .saturating_add(added)
+            .min(self.capacity_milli);
         if self.tokens_milli >= 1000 {
             self.tokens_milli -= 1000;
             true
@@ -156,15 +171,17 @@ pub async fn send_raw_packet(
     Ok(())
 }
 
-/// Sends a structured chat message with up to 3 retries waiting for ACK.
-pub async fn send_message_with_retry(
+/// Sends an already-encrypted packet with retries, waiting for its ACK.
+///
+/// The packet is built once by the caller (it may be tried over Bluetooth
+/// first), so falling back to UDP does not encrypt the message twice.
+pub async fn send_packet_with_retry(
     socket: Arc<UdpSocket>,
     peer_addr: SocketAddr,
-    message: &ChatMessage,
+    packet_str: &str,
+    message_id: u64,
     ack_registry: AckRegistry,
-    key: [u8; 32],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let packet_str = message.to_packet_string(&key)?;
     let retry_limit = 3;
     let mut attempt = 0;
 
@@ -174,19 +191,22 @@ pub async fn send_message_with_retry(
         let (tx, rx) = oneshot::channel();
         {
             let mut reg = ack_registry.lock().await;
-            reg.remove(&message.id);
-            reg.insert(message.id, (peer_addr, tx));
+            reg.remove(&message_id);
+            reg.insert(message_id, (peer_addr, tx));
         }
 
-        if let Err(e) = send_raw_packet(&socket, peer_addr, &packet_str).await {
+        if let Err(e) = send_raw_packet(&socket, peer_addr, packet_str).await {
             eprintln!("[ERROR] Failed to send UDP packet: {}", e);
             {
                 let mut reg = ack_registry.lock().await;
-                reg.remove(&message.id);
+                reg.remove(&message_id);
             }
             if attempt >= retry_limit {
-                return Err("Failed to deliver message: send_raw_packet failed after 3 attempts.".into());
+                return Err(
+                    "Failed to deliver message: send_raw_packet failed after 3 attempts.".into(),
+                );
             }
+            tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
             continue;
         }
 
@@ -195,11 +215,16 @@ pub async fn send_message_with_retry(
             _ => {
                 {
                     let mut reg = ack_registry.lock().await;
-                    reg.remove(&message.id);
+                    reg.remove(&message_id);
                 }
                 if attempt >= retry_limit {
-                    return Err("Failed to deliver message: No ACK received after 3 attempts.".into());
+                    return Err(
+                        "Failed to deliver message: No ACK received after 3 attempts.".into(),
+                    );
                 }
+                // Space retries out; three back-to-back datagrams in 1.5 s
+                // are usually lost for the same transient reason.
+                tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
             }
         }
     }
@@ -339,7 +364,13 @@ pub async fn handle_discovery(packet_str: &str, src_addr: SocketAddr, ctx: &Disc
 
     let outcome = {
         let mut reg = ctx.peers.lock().await;
-        upsert_peer(&mut reg, &disc.username, &disc.ip, disc.port, disc.authenticated)
+        upsert_peer(
+            &mut reg,
+            &disc.username,
+            &disc.ip,
+            disc.port,
+            disc.authenticated,
+        )
     };
     if outcome == Upsert::Rejected {
         return;
@@ -357,7 +388,7 @@ pub async fn handle_discovery(packet_str: &str, src_addr: SocketAddr, ctx: &Disc
     // session left behind would otherwise stop us from ever re-handshaking.
     let already_connected = {
         let reg = ctx.peers.lock().await;
-        reg.get(&disc.username).map_or(false, |p| p.connected)
+        reg.get(&disc.username).is_some_and(|p| p.connected)
     };
     if already_connected {
         return;
@@ -527,7 +558,10 @@ pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discover
             }
 
             // The signature covers the unsigned portion including the port.
-            let payload = format!("HOPCHAT|{}|{}|{}|{}", parts[1], parts[2], parts[3], parts[4]);
+            let payload = format!(
+                "HOPCHAT|{}|{}|{}|{}",
+                parts[1], parts[2], parts[3], parts[4]
+            );
             if !LocalIdentity::verify_signature(parts[5], payload.as_bytes(), parts[6]) {
                 return None;
             }
@@ -568,19 +602,36 @@ pub fn parse_discovery_packet(packet_str: &str, src_ip: &str) -> Option<Discover
 // Main Listener
 // =============================================================================
 
+/// Everything the UDP listener shares with the rest of the app.
+pub struct ListenerConfig {
+    pub socket: Arc<UdpSocket>,
+    pub our_username: String,
+    pub history: ChatHistory,
+    pub ack_registry: AckRegistry,
+    pub peer_keys: PeerKeyRegistry,
+    pub local_keypair: Arc<X25519KeyPair>,
+    pub local_identity: Arc<LocalIdentity>,
+    pub peer_registry: PeerRegistry,
+    pub trust_db: TrustRegistry,
+}
+
 /// Listens for incoming UDP packets: chat messages, ACKs, key exchanges,
 /// and discovery echoes. Uses the shared socket for both receive and send.
 pub async fn listen_for_messages(
-    socket: Arc<UdpSocket>,
-    our_username: String,
-    history: ChatHistory,
-    ack_registry: AckRegistry,
-    peer_keys: PeerKeyRegistry,
-    local_keypair: Arc<X25519KeyPair>,
-    local_identity: Arc<LocalIdentity>,
-    peer_registry: PeerRegistry,
-    trust_db: TrustRegistry,
+    config: ListenerConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ListenerConfig {
+        socket,
+        our_username,
+        history,
+        ack_registry,
+        peer_keys,
+        local_keypair,
+        local_identity,
+        peer_registry,
+        trust_db,
+    } = config;
+
     // Rate limiting state
     let mut rate_limits: HashMap<IpAddr, TokenBucket> = HashMap::new();
     let mut rate_limit_order: VecDeque<IpAddr> = VecDeque::new();
@@ -593,7 +644,10 @@ pub async fn listen_for_messages(
 
     // Our own discovery info for echo responses
     let our_ip = crate::get_local_ip();
-    let our_chat_port = socket.local_addr().map(|a| a.port()).unwrap_or(crate::PREFERRED_CHAT_PORT);
+    let our_chat_port = socket
+        .local_addr()
+        .map(|a| a.port())
+        .unwrap_or(crate::PREFERRED_CHAT_PORT);
 
     // Large enough for the longest legal packet (a max-size HOPCHAT_MSG is a
     // little over 8 KiB of hex). A shorter buffer silently truncates datagrams
@@ -614,7 +668,9 @@ pub async fn listen_for_messages(
                 rate_limits.insert(ip, TokenBucket::new(200, 100));
                 rate_limit_order.push_back(ip);
             }
-            let bucket = rate_limits.get_mut(&ip).unwrap();
+            let Some(bucket) = rate_limits.get_mut(&ip) else {
+                continue;
+            };
             if !bucket.try_consume(now) {
                 continue; // Drop: rate limit exceeded
             }
@@ -694,7 +750,9 @@ pub async fn listen_for_messages(
                                 }
                             }
 
-                            if let Ok(derived_key) = local_keypair.derive_session_key(sender_x25519_hex) {
+                            if let Ok(derived_key) =
+                                local_keypair.derive_session_key(sender_x25519_hex)
+                            {
                                 let mut keys_lock = peer_keys.lock().await;
                                 let already_had_key = keys_lock.contains_key(&sender_username);
 
@@ -705,12 +763,15 @@ pub async fn listen_for_messages(
                                 // the key actually changes.
                                 let unchanged = keys_lock
                                     .get(&sender_username)
-                                    .map_or(false, |s| s.key == derived_key);
+                                    .is_some_and(|s| s.key == derived_key);
                                 if !unchanged {
-                                    keys_lock.insert(sender_username.clone(), PeerSession {
-                                        key: derived_key,
-                                        replay: ReplayWindow::new(),
-                                    });
+                                    keys_lock.insert(
+                                        sender_username.clone(),
+                                        PeerSession {
+                                            key: derived_key,
+                                            replay: ReplayWindow::new(),
+                                        },
+                                    );
                                 }
 
                                 // Update IP cache
@@ -747,7 +808,9 @@ pub async fn listen_for_messages(
                                     drop(reg);
                                     if is_new {
                                         crate::network::peer_registry::resolve_hostname(
-                                            peer_registry.clone(), sender_username.clone(), peer_ip,
+                                            peer_registry.clone(),
+                                            sender_username.clone(),
+                                            peer_ip,
                                         );
                                     }
                                 }
@@ -768,37 +831,50 @@ pub async fn listen_for_messages(
                 // ==========================================================
                 // HOPCHAT_MSG — Encrypted Chat Message
                 // ==========================================================
-                } else if packet_str.starts_with("HOPCHAT_MSG|") {
-                    let ciphertext_hex = &packet_str["HOPCHAT_MSG|".len()..];
-
+                } else if let Some(ciphertext_hex) = packet_str.strip_prefix("HOPCHAT_MSG|") {
                     // Length validation
-                    if ciphertext_hex.len() % 2 != 0 || ciphertext_hex.len() < 32 || ciphertext_hex.len() > 8192 {
+                    if ciphertext_hex.len() % 2 != 0
+                        || ciphertext_hex.len() < 32
+                        || ciphertext_hex.len() > 8192
+                    {
                         continue;
                     }
 
-                    let mut decrypted_msg = None;
-                    let mut matched_username = None;
-
+                    // Decryption, peer matching and the replay check happen
+                    // under one lock. Previously the key was read, the lock was
+                    // released, and the replay window was re-read later; a key
+                    // rotation in between could accept a message against the
+                    // wrong session's replay state.
+                    let mut accepted: Option<(ChatMessage, String, bool)> = None;
                     {
-                        let keys_lock = peer_keys.lock().await;
+                        let mut keys_lock = peer_keys.lock().await;
 
                         // O(1) fast path: IP cache
-                        if let Some(username) = ip_to_username.get(&ip) {
-                            if let Some(session) = keys_lock.get(username) {
-                                if let Some(msg) = ChatMessage::from_packet_string(packet_str, &session.key) {
-                                    decrypted_msg = Some(msg);
-                                    matched_username = Some(username.clone());
+                        if let Some(username) = ip_to_username.get(&ip).cloned() {
+                            if let Some(session) = keys_lock.get_mut(&username) {
+                                if let Some(msg) =
+                                    ChatMessage::from_packet_string(packet_str, &session.key)
+                                {
+                                    if message_is_for_us(&msg, &username, &our_username) {
+                                        let fresh = session.replay.check_and_accept(msg.id);
+                                        accepted = Some((msg, username, fresh));
+                                    }
                                 }
                             }
                         }
 
                         // O(N) slow path: trial decryption
-                        if decrypted_msg.is_none() {
-                            for (peer_username, session) in keys_lock.iter() {
-                                if let Some(msg) = ChatMessage::from_packet_string(packet_str, &session.key) {
-                                    decrypted_msg = Some(msg);
-                                    matched_username = Some(peer_username.clone());
-                                    break;
+                        if accepted.is_none() {
+                            for (peer_username, session) in keys_lock.iter_mut() {
+                                if let Some(msg) =
+                                    ChatMessage::from_packet_string(packet_str, &session.key)
+                                {
+                                    if message_is_for_us(&msg, peer_username, &our_username) {
+                                        let fresh = session.replay.check_and_accept(msg.id);
+                                        let username = peer_username.clone();
+                                        accepted = Some((msg, username, fresh));
+                                        break;
+                                    }
                                 }
                                 tokio::task::yield_now().await;
                             }
@@ -806,7 +882,7 @@ pub async fn listen_for_messages(
                     }
 
                     // Update IP cache
-                    if let Some(ref username) = matched_username {
+                    if let Some((_, username, _)) = accepted.as_ref() {
                         if !ip_to_username.contains_key(&ip) {
                             while ip_cache_order.len() >= IP_CACHE_CAP {
                                 if let Some(evict) = ip_cache_order.pop_front() {
@@ -818,21 +894,7 @@ pub async fn listen_for_messages(
                         ip_to_username.insert(ip, username.clone());
                     }
 
-                    if let (Some(msg), Some(peer_username)) = (decrypted_msg, matched_username) {
-                        // Both directions share one symmetric key, so a datagram
-                        // reflected back at us decrypts perfectly and would look
-                        // like a message from the peer. The routing fields inside
-                        // the ciphertext are the only thing that distinguish the
-                        // two: it must be addressed to us, and it must not be
-                        // from us. This runs before the ACK, otherwise a reflector
-                        // still gets acknowledged and still keeps the peer alive.
-                        if msg.sender == our_username
-                            || msg.receiver != our_username
-                            || msg.sender != peer_username
-                        {
-                            continue;
-                        }
-
+                    if let Some((msg, peer_username, is_new)) = accepted {
                         let msg_id = msg.id;
 
                         // Send ACK
@@ -844,16 +906,6 @@ pub async fn listen_for_messages(
                             let mut reg = peer_registry.lock().await;
                             mark_reachable(&mut reg, &peer_username, &src_addr.ip().to_string());
                         }
-
-                        // Sliding window replay check (per-peer)
-                        let is_new = {
-                            let mut keys_lock = peer_keys.lock().await;
-                            if let Some(session) = keys_lock.get_mut(&peer_username) {
-                                session.replay.check_and_accept(msg_id)
-                            } else {
-                                false
-                            }
-                        };
 
                         if is_new {
                             let mut history_lock = history.lock().await;

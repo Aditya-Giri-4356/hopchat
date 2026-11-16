@@ -3,7 +3,8 @@
 // =============================================================================
 //
 // Manual argument parser — no external dependencies (no clap).
-// Supports: -p/--port, -u/--username, -h/--help, --version
+// Supports: -p/--port, -u/--username, --no-wifi, --no-bluetooth,
+//           -h/--help, --version
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -13,6 +14,10 @@ pub struct Config {
     pub port: u16,
     /// Optional username to skip the interactive prompt
     pub username: Option<String>,
+    /// LAN/Wi-Fi discovery announcements (default: on)
+    pub lan: bool,
+    /// Bluetooth LE transport (default: on where supported)
+    pub bluetooth: bool,
 }
 
 /// Parses command-line arguments into a Config.
@@ -22,6 +27,8 @@ pub fn parse_args() -> Config {
     let mut config = Config {
         port: crate::PREFERRED_CHAT_PORT,
         username: None,
+        lan: true,
+        bluetooth: true,
     };
 
     let mut i = 1;
@@ -30,12 +37,19 @@ pub fn parse_args() -> Config {
             "-p" | "--port" => {
                 if i + 1 < args.len() {
                     config.port = args[i + 1].parse().unwrap_or_else(|_| {
-                        eprintln!("Invalid port: '{}'. Using default {}.", args[i + 1], crate::PREFERRED_CHAT_PORT);
+                        eprintln!(
+                            "Invalid port: '{}'. Using default {}.",
+                            args[i + 1],
+                            crate::PREFERRED_CHAT_PORT
+                        );
                         crate::PREFERRED_CHAT_PORT
                     });
                     i += 1;
                 } else {
-                    eprintln!("--port requires a value. Using default {}.", crate::PREFERRED_CHAT_PORT);
+                    eprintln!(
+                        "--port requires a value. Using default {}.",
+                        crate::PREFERRED_CHAT_PORT
+                    );
                 }
             }
             "-u" | "--username" => {
@@ -56,14 +70,25 @@ pub fn parse_args() -> Config {
                     eprintln!("--username requires a value. Will prompt interactively.");
                 }
             }
+            "--no-wifi" | "--no-lan" => {
+                config.lan = false;
+            }
+            "--no-bluetooth" | "--no-ble" => {
+                config.bluetooth = false;
+            }
             "-h" | "--help" => {
                 println!("HOPCHAT v{} — Encrypted P2P LAN Chat", VERSION);
                 println!();
                 println!("Usage: hopchat [OPTIONS]");
                 println!();
                 println!("Options:");
-                println!("  -p, --port <PORT>        Chat port (default: {})", crate::PREFERRED_CHAT_PORT);
+                println!(
+                    "  -p, --port <PORT>        Chat port (default: {})",
+                    crate::PREFERRED_CHAT_PORT
+                );
                 println!("  -u, --username <NAME>    Username (skips interactive prompt)");
+                println!("      --no-wifi            Start with LAN/Wi-Fi announcements off");
+                println!("      --no-bluetooth       Start with the Bluetooth transport off");
                 println!("  -h, --help               Show this help message");
                 println!("      --version            Show version information");
                 std::process::exit(0);

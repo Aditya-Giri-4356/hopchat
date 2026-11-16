@@ -58,7 +58,8 @@ impl X25519KeyPair {
             return Err("Peer public key is a low-order point (all-zero shared secret)".to_string());
         }
 
-        // Hash the resulting secret bytes through SHA-256 to derive a strong symmetric key
+        // The raw X25519 output is never used directly as the cipher key. SHA-256 acts
+        // as a one-step KDF here, matching the wire format both peers already use.
         let mut hasher = Sha256::new();
         hasher.update(shared_secret.as_bytes());
         let result = hasher.finalize();

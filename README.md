@@ -1,9 +1,9 @@
 # HOPCHAT
 
-**Status: Production-Hardened (v2.4.0)**
+**Status: Production-Hardened (v2.5.0)**
 
 
-HOPCHAT is a lightweight, decentralized, deeply encrypted terminal messenger written in Rust. It enables real-time peer-to-peer texting across local networks, isolated WiFi environments, and phone hotspots—no internet access required.
+HOPCHAT is a lightweight, decentralized, deeply encrypted terminal messenger written in Rust. It enables real-time peer-to-peer texting across local networks, isolated WiFi environments, phone hotspots, and direct Bluetooth LE links—no internet access required.
 
 Inspired by the [permissionlesstech/bitchat](https://github.com/permissionlesstech/bitchat) project, HOPCHAT focuses on ultra-fast, offline-first LAN communication, utilizing pure UDP, dynamic X25519 Key Exchange, and XChaCha20-Poly1305 authenticated encryption.
 
@@ -53,8 +53,10 @@ This repository contains two versions of HopChat to preserve development history
 - **DoS Mitigation**: Built-in Token-Bucket rate limiting on the UDP listener to prevent network floods from crashing your node.
 - **Robust UDP Protocol**: Replaces TCP handshakes with custom UDP structs. Includes automatic ACKs, deduplication, and a 3-strike 500ms jittered retransmission loop to guarantee delivery over spotty WiFi.
 - **O(1) Memory Pruning**: Uses `VecDeque` ring buffers for chat history so message pruning executes in constant time with zero array shifts.
-- **High Fallback Redundancy**: Sends discovery broadcasts parallel via IPV4 Multicast (239.255.255.250), Broadcast Fallbacks (255.255.255.255), and directed subnet sweeps.
-- **iSH Terminal Support**: Works flawlessly inside iOS Alpine shells using the manual direct-IP bypass (/connect <ip>) and subnet sweep.
+- **High Fallback Redundancy**: Sends discovery broadcasts parallel via IPV4 Multicast (239.255.255.250), Broadcast Fallbacks (255.255.255.255), and directed sweeps across every active interface.
+- **Bluetooth LE Transport**: On macOS and Linux, every node advertises a GATT service and scans for peers, so two devices can chat with no router or hotspot at all. Bluetooth is preferred when a link exists and UDP is used as the fallback; both carry the same signed handshake, TOFU pins, and encrypted envelope.
+- **Visible Transports**: `/wifi` and `/bluetooth` report the real interface/radio state, and can pause either radio without restarting the app.
+- **iSH Terminal Support**: Works flawlessly inside iOS Alpine shells using the manual direct-IP bypass (/connect <ip>) and subnet sweep. iSH cannot access Bluetooth hardware, so the BLE transport is compiled out there and the UI reports it as unavailable; Wi-Fi chat is unchanged.
 - **Sub-2% Resource Usage**: Powered by tokio asynchronous lightweight tasks spanning under 30MB of RAM and a 1.3MB stripped binary.
 - **The Hardened Killswitch**: Includes a verified `killswitch.sh` script with safety checks and confirmation prompts to cleanly purge the application, trust database, identity keys, and source code.
 
@@ -130,7 +132,7 @@ cargo run --release
 
 ### Command-Line Arguments
 
-HopChat v2.4.0 supports zero-dependency CLI arguments:
+HopChat v2.5.0 supports zero-dependency CLI arguments:
 
 ```bash
 Usage: hopchat [OPTIONS]
@@ -138,6 +140,8 @@ Usage: hopchat [OPTIONS]
 Options:
   -p, --port <PORT>        Chat UDP port (default: 9878)
   -u, --username <NAME>    Username (skips the interactive prompt)
+      --no-wifi            Start with LAN/Wi-Fi announcements off
+      --no-bluetooth       Start with the Bluetooth transport off
   -h, --help               Show help message
       --version            Show version information
 ```
@@ -194,12 +198,54 @@ Inside the chat buffer, you can execute special slash commands:
 - `/help` - Show the contextual help menu.
 - `/scan` - Launch the Interactive Subnet Scanner (especially useful on mobile).
 - `/nearby` - Open the Nearby window, the same list the scanner gives you.
-- `/peers` - List all currently active peers, along with their resolved local IP addresses.
+- `/peers` - List all currently active peers, along with their resolved local IP addresses and whether each is linked over Wi-Fi, Bluetooth, or both.
+- `/wifi [on|off|status|scan]` - Show the active IPv4 interfaces and the subnets being swept, pause/resume LAN announcements, or open the scanner. Receiving from peers who already know your address still works while announcements are paused.
+- `/bluetooth [on|off|status|scan]` - Show the radio state and authenticated links, or pause/resume BLE advertising and scanning. On iSH this reports that Bluetooth is unavailable instead of pretending.
 - `/connect <ip> [port]` - Manually fire a handshake to a specific address. The port is optional and defaults to the peer's advertised one. (The Subnet Scanner is highly recommended over this).
 - `/trust` - Show the identity keys pinned for your peers so far.
 - `/unpin <username>` - Forget a pinned key. Use this when a peer reinstalls and comes back with a new identity; otherwise the old pin rejects them.
 - `/clear` - Clear the conversation you are currently looking at.
 - `/quit` - Safely exit the application. Alternatively, tap the **`[ QUIT ]`** button on mobile.
+
+---
+
+## Transports
+
+HopChat has two independent ways to reach a peer. Nothing above the transport layer
+changes between them: same identity, same X25519 session, same TOFU trust database, same
+replay window, same encrypted envelope.
+
+### Wi-Fi / LAN (UDP, all platforms)
+
+The original transport. Discovery uses multicast, limited broadcast, and a directed sweep
+of the local /24 on every active IPv4 interface, so a laptop on Wi-Fi and Ethernet is
+reachable on both, and a hotspot behind a VPN is still covered. `hopchat --no-wifi` starts
+with announcements paused; `/wifi off` pauses them at runtime and leaves the listener up.
+There is no portable terminal API for Wi-Fi Direct/IBSS, so HopChat does not claim to join
+ad-hoc Wi-Fi networks — it uses the IP network the device is already on.
+
+### Bluetooth LE (macOS and Linux)
+
+Every node runs both GATT roles at once:
+
+* **Peripheral** — advertises the HopChat service and accepts encrypted chat frames.
+* **Central** — scans for the same service and connects when it finds a peer.
+
+To avoid two devices connecting to each other twice, the advertisement carries `HC` plus
+the first 8 hex characters of SHA-256(Ed25519 public key), and only the lexicographically
+smaller name initiates the connection. Large packets are split into 160-byte fragments
+with a 7-byte header and paced at 6 ms to survive phone ATT queues. The BLE handshake is
+signed with the same Ed25519 identity and bound to the advertised address, port, and a
+300-second timestamp; chat itself is the normal XChaCha20-Poly1305 envelope.
+
+Practical range is roughly 10–30 m, line of sight. Links persist while the app runs, and
+an idle link is kept fresh with a signed heartbeat every 20 s. If a peer has a BLE link it
+is tried first; if that link is busy or gone, HopChat falls back to UDP automatically.
+
+On iSH there is no Bluetooth hardware exposed to the Linux userland, so the BLE backend is
+not compiled into the `i586` build. `/bluetooth` and the mobile status bar report `n/a`, and
+Wi-Fi chat works exactly as before. macOS may ask for Bluetooth permission the first time
+the transport starts.
 
 ---
 
@@ -229,11 +275,9 @@ This performs a safety verification check against `Cargo.toml`, requests interac
 
 ## Roadmap
 
-HOPCHAT currently speaks UDP over whatever IP network it happens to be attached to. The next big step is decoupling that: one small binary envelope, and a transport layer that can carry it over Bluetooth LE, Wi-Fi Direct, LoRa, or even sound when the network isn't there.
+BLE GATT is now a working second transport on macOS and Linux, alongside the UDP LAN path. The next big step is still decoupling the envelope from hex so the narrowest pipes are cheap: BLE L2CAP CoC for speed, a mesh relay layer so A can reach C through B, a LoRa bridge via cheap Meshtastic radios for kilometre-range hops, and file transfer once the envelope is binary rather than hex.
 
 That plan got long enough to deserve its own page. **→ [TRANSPORT_PLAN.md](TRANSPORT_PLAN.md)**
-
-Short version of what's coming: BLE as a first-class transport (GATT for compatibility, L2CAP CoC for speed), a mesh relay layer so A can reach C through B, a LoRa bridge via cheap Meshtastic radios for kilometre-range hops, and file transfer once the envelope is binary rather than hex.
 
 ---
 

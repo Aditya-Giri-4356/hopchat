@@ -2,6 +2,80 @@
 
 ---
 
+## v2.5.0 — Bluetooth LE Transport and Wi-Fi Controls (2026-11-17)
+
+HopChat can now reach a peer without a shared IP network, and the LAN path is visible and
+controllable from inside the app.
+
+### 📡 Bluetooth LE Transport (macOS / Linux)
+
+* **Dual-role GATT** — every node advertises a HopChat service and scans for the same
+  service, so neither side has to be configured as a server. The advertisement name is
+  `HC` + the first 8 hex characters of SHA-256(Ed25519 public key); only the
+  lexicographically smaller name initiates the connection, which prevents duplicate links.
+* **Same security as UDP** — the BLE introduction is a signed `HOPCHAT_BLE` handshake
+  bound to the X25519 key, address, port, and a timestamp (300 s freshness). It feeds the
+  existing TOFU database, session keys, replay window, and XChaCha20-Poly1305 envelope.
+* **Fragmentation** — 160-byte payloads behind a 7-byte header, 6 ms pacing, 16 KiB
+  ceiling, 10 s reassembly timeout, and sequence-hole detection.
+* **Resilience** — 20 s signed heartbeats keep idle links from aging out; teardown tokens
+  stop a late disconnect from removing a newer link; a cancelled read request is always
+  answered so the CoreBluetooth delegate cannot wedge.
+* **Fallback** — a peer with a BLE link is tried first, then UDP if the link is busy or
+  gone. A BLE send is reported as "Delivered over Bluetooth ✓" only after the peer
+  acknowledges the message over the link; otherwise it reports the lack of an ACK.
+* **macOS crash fixed during validation** — the notify characteristic no longer has a
+  cached initial value. CoreBluetooth throws an Objective-C exception while adding such a
+  characteristic, which Rust cannot catch and which aborted the whole process.
+* **iSH unaffected** — the backend is compiled out for `i586`, where no Bluetooth hardware
+  exists. The handle reports `n/a` instead of spawning a doomed radio stack.
+
+### 📶 Wi-Fi / LAN Controls
+
+* `/wifi [on|off|status|scan]` — lists active IPv4 interfaces, identifies the wireless
+  interface, shows the /24 sweeps, and pauses/resumes announcements. `--no-wifi` starts
+  with announcements off.
+* Discovery now sweeps **every active interface** (up to four), instead of only the default
+  route, so Wi-Fi + Ethernet laptops and hotspot-behind-VPN setups both work.
+* The network status bar shows real `Wi-Fi` and `BLE` state on desktop; the compact mobile
+  bar shows both radios on one line for iSH-width terminals.
+
+### 🐛 Fixes
+
+* **BLE delivery acknowledgement** — the receiver now sends a link-scoped
+  `HOPCHAT_BLE_ACK` after validating a message, and the sender waits for it before
+  claiming delivery. Closing a link fails its pending acknowledgements immediately.
+* **Replay/key race** — UDP decryption and the per-peer replay-window update now happen
+  under one lock, so a concurrent key rotation cannot check a message against a different
+  session's window. The BLE path uses the same single-lock order.
+* **Bluetooth liveness** — a quiet LAN no longer ages out an active BLE link, and a late
+  BLE heartbeat no longer flickers a peer offline. BLE and UDP have independent timers.
+* **Delivery retries** — UDP retries now back off instead of firing three datagrams in a
+  1.5 s burst, and the packet is encrypted once even when BLE falls back to UDP.
+* **`/clear` with no peer selected** now clears only the GLOBAL conversation, not every
+  peer's history.
+* **`/clear`, `/trust`, and sends** used an unsorted `HashMap` snapshot while the UI used a
+  sorted one, so commands could target a different peer than the highlighted one.
+* **Input** — Home, End, and Delete now work in the composer. Rapid Tab presses no longer
+  start overlapping subnet scans.
+* **I/O errors** — trust-database and identity saves report failures instead of silently
+  losing a pinned key; reverse DNS has a 3 s timeout; secret-seed zeroization uses
+  `zeroize`.
+* **Chat title** no longer indexes a peer list without checking that the selected index
+  exists.
+* **Panic-free identity access** — public key, signing, and fingerprint helpers derive
+  missing cached values instead of using `expect`, and corrupt identity/trust files are
+  reported instead of being reset silently.
+* **Code quality** — the crate is `rustfmt`-clean and `cargo clippy --all-targets` is
+  warning-free; the two over-long argument lists were grouped into context structs.
+* Peers reachable only over Bluetooth are now listed, selectable, and marked `[bt]` (or
+  `[bt+lan]` when both transports are up) instead of appearing offline.
+* Pressing Enter on an already-linked BLE peer no longer builds a bogus `/connect` command
+  from a non-IP address.
+* `--no-wifi` / `--no-bluetooth` are documented in `--help` and the README.
+
+---
+
 ## v2.4.0 — Handshake Authentication, TOFU Pinning on Discovery, Rate Limits
 
 A security release. It changes the handshake signature format, so **all devices must be updated together** — a v2.4.0 node will not complete a key exchange with a v2.3.0 node.

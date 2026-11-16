@@ -27,8 +27,15 @@ pub struct Peer {
     /// kept so the friend list does not lose people when a single broadcast
     /// is dropped, which on a phone hotspot is most of them.
     pub online: bool,
-    /// True once a session key has been negotiated with this peer.
+    /// True once a session key has been negotiated over UDP.
     pub connected: bool,
+    /// True while an authenticated Bluetooth link is open. Kept separate from
+    /// `connected` because a peer can be reachable over either transport (or
+    /// both) and losing one must not mark the other as down.
+    pub ble_connected: bool,
+    /// Last authenticated Bluetooth traffic, tracked separately from UDP so a
+    /// quiet radio link is not aged out by LAN silence (and vice versa).
+    pub ble_last_seen: Instant,
 }
 
 impl Peer {
@@ -51,6 +58,10 @@ pub const MAX_PEERS: usize = 1000;
 /// on a lossy link flicker out of the friend list while still sitting on the
 /// same network.
 pub const OFFLINE_AFTER: Duration = Duration::from_secs(120);
+
+/// Bluetooth heartbeats run every 20 seconds; allow four missed beats before
+/// deciding the link itself is stale.
+const BLE_OFFLINE_AFTER: Duration = Duration::from_secs(90);
 
 /// Outcome of registering a peer announced by a discovery packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +130,8 @@ pub fn upsert_peer(
             last_seen: Instant::now(),
             online: true,
             connected: false,
+            ble_connected: false,
+            ble_last_seen: Instant::now(),
         },
     );
     Upsert::Inserted
@@ -148,6 +161,38 @@ pub fn mark_connected(registry: &mut HashMap<String, Peer>, username: &str) {
     }
 }
 
+/// Records that an authenticated Bluetooth link to this peer is open.
+#[cfg_attr(
+    not(all(
+        any(target_os = "macos", target_os = "linux"),
+        not(target_arch = "x86")
+    )),
+    allow(dead_code)
+)]
+pub fn mark_ble_connected(registry: &mut HashMap<String, Peer>, username: &str) {
+    if let Some(peer) = registry.get_mut(username) {
+        peer.ble_connected = true;
+        peer.online = true;
+        peer.last_seen = Instant::now();
+        peer.ble_last_seen = Instant::now();
+    }
+}
+
+/// Records that this peer's Bluetooth link closed. The UDP session, if any,
+/// is intentionally left alone.
+#[cfg_attr(
+    not(all(
+        any(target_os = "macos", target_os = "linux"),
+        not(target_arch = "x86")
+    )),
+    allow(dead_code)
+)]
+pub fn mark_ble_disconnected(registry: &mut HashMap<String, Peer>, username: &str) {
+    if let Some(peer) = registry.get_mut(username) {
+        peer.ble_connected = false;
+    }
+}
+
 /// Background task that flags silent peers as offline.
 ///
 /// Entries are kept rather than deleted: a peer that drops one broadcast is
@@ -162,9 +207,18 @@ pub async fn cleanup_task(registry: PeerRegistry) {
         let mut reg = registry.lock().await;
 
         for peer in reg.values_mut() {
+            // Bluetooth liveness is independent of UDP silence. Clearing it
+            // from the UDP timer made a live BLE peer flicker offline whenever
+            // a heartbeat arrived late, so only the BLE-specific age can drop
+            // the flag here; normal link teardown clears it earlier.
+            if peer.ble_connected && peer.ble_last_seen.elapsed() >= BLE_OFFLINE_AFTER {
+                peer.ble_connected = false;
+            }
             if peer.last_seen.elapsed() >= OFFLINE_AFTER {
-                peer.online = false;
                 peer.connected = false;
+                if !peer.ble_connected {
+                    peer.online = false;
+                }
             }
         }
 
@@ -176,18 +230,23 @@ pub async fn cleanup_task(registry: PeerRegistry) {
 }
 
 /// Spawns a background task to resolve the hostname of a peer.
+///
+/// Reverse DNS is best-effort display data. It gets its own short timeout so
+/// a broken resolver cannot pin a blocking thread and starve other lookups.
 pub fn resolve_hostname(registry: PeerRegistry, username: String, ip: String) {
     tokio::spawn(async move {
-        if let Ok(ip_addr) = ip.parse::<std::net::IpAddr>() {
-            if let Ok(hostname) = tokio::task::spawn_blocking(move || dns_lookup::lookup_addr(&ip_addr))
-                .await
-                .unwrap_or_else(|_| Err(std::io::Error::new(std::io::ErrorKind::Other, "task failed")))
-            {
-                let mut reg = registry.lock().await;
-                if let Some(peer) = reg.get_mut(&username) {
-                    peer.hostname = Some(hostname);
-                }
-            }
+        let Ok(ip_addr) = ip.parse::<std::net::IpAddr>() else {
+            return;
+        };
+        let lookup = tokio::task::spawn_blocking(move || dns_lookup::lookup_addr(&ip_addr));
+        let Ok(Ok(Ok(hostname))) = tokio::time::timeout(Duration::from_secs(3), lookup).await
+        else {
+            return;
+        };
+
+        let mut reg = registry.lock().await;
+        if let Some(peer) = reg.get_mut(&username) {
+            peer.hostname = Some(hostname);
         }
     });
 }

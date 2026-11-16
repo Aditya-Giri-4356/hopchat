@@ -13,16 +13,18 @@
 //   listen_for_peers()   — binds to DISCOVERY_PORT (9877) to receive broadcasts.
 //                          Falls back gracefully if bind fails (iSH).
 //
-// Packet format (v2.4.0):
+// Packet format (v2.4.0+):
 //   HOPCHAT|username|ip|port|timestamp|ed25519_pub|signature
 //
 // Backward compatibility: listen_for_peers() also accepts the old 4-field
 // format (HOPCHAT|username|ip|port) from v2.2.0 clients.
 
 use crate::network::messaging::{self, DiscoveryCtx, TokenBucket};
+use crate::network::wifi;
 use crate::user::identity::LocalIdentity;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::UdpSocket;
@@ -43,6 +45,7 @@ pub async fn broadcast_presence(
     username: String,
     chat_port: u16,
     identity: Arc<LocalIdentity>,
+    enabled: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     let _ = socket.set_broadcast(true);
@@ -64,12 +67,27 @@ pub async fn broadcast_presence(
     loop {
         tick.tick().await;
 
+        // `/wifi off` pauses LAN announcements without touching the listener,
+        // so peers already on the network can still reach us.
+        if !enabled.load(Ordering::Relaxed) {
+            continue;
+        }
+
         // Re-read the address every tick. A laptop that roams to another
         // network would otherwise keep announcing — and sweeping — its old
         // subnet for as long as it runs.
         let ip = crate::get_local_ip();
-        let subnet = subnet_prefix(&ip);
-        if subnet.is_none() && !warned {
+
+        // Sweep every active interface, not just the default route: a laptop
+        // on Wi-Fi and Ethernet has peers on both, and a phone hotspot can
+        // sit behind a VPN that owns the default route.
+        let mut subnets = wifi::local_subnets();
+        if subnets.is_empty() {
+            if let Some(prefix) = subnet_prefix(&ip) {
+                subnets.push(prefix);
+            }
+        }
+        if subnets.is_empty() && !warned {
             warned = true;
             eprintln!(
                 "[hopchat] no IPv4 LAN address ({}); relying on broadcast and multicast only",
@@ -86,10 +104,10 @@ pub async fn broadcast_presence(
         // Method 2: Multicast
         let _ = socket.send_to(data, &multicast_addr).await;
 
-        // Method 3: Directed subnet sweep
+        // Method 3: Directed subnet sweep across every local interface
         ticks = ticks.wrapping_add(1);
-        if let Some(ref prefix) = subnet {
-            if ticks % SWEEP_EVERY_TICKS == 1 {
+        if ticks % SWEEP_EVERY_TICKS == 1 {
+            for prefix in &subnets {
                 sweep(&socket, prefix, data, chat_port).await;
             }
         }

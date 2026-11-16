@@ -5,7 +5,7 @@
 // Processes keyboard events from crossterm and translates them into
 // actions on the application state.
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, EventStream};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use futures::StreamExt;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -32,6 +32,12 @@ pub enum InputAction {
     CursorLeft,
     /// Move the text cursor one character right
     CursorRight,
+    /// Move the text cursor to the start of the input
+    CursorHome,
+    /// Move the text cursor to the end of the input
+    CursorEnd,
+    /// Delete the character after the cursor
+    Delete,
     /// A mouse click occurred at (x, y)
     Click(u16, u16),
     /// No action (timeout or irrelevant event)
@@ -52,7 +58,9 @@ pub async fn next_input_event(stream: &mut EventStream, max_wait: Duration) -> I
                 }
                 return match key.code {
                     KeyCode::Char('c')
-                        if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
                     {
                         InputAction::Quit
                     }
@@ -62,6 +70,9 @@ pub async fn next_input_event(stream: &mut EventStream, max_wait: Duration) -> I
                     KeyCode::Backspace => InputAction::Backspace,
                     KeyCode::Left => InputAction::CursorLeft,
                     KeyCode::Right => InputAction::CursorRight,
+                    KeyCode::Home => InputAction::CursorHome,
+                    KeyCode::End => InputAction::CursorEnd,
+                    KeyCode::Delete => InputAction::Delete,
                     KeyCode::Up => InputAction::SelectUp,
                     KeyCode::Down => InputAction::SelectDown,
                     KeyCode::Char(c) => InputAction::Character(c),
@@ -69,7 +80,9 @@ pub async fn next_input_event(stream: &mut EventStream, max_wait: Duration) -> I
                 };
             }
             Event::Mouse(mouse_event) => {
-                if mouse_event.kind == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) {
+                if mouse_event.kind
+                    == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                {
                     return InputAction::Click(mouse_event.column, mouse_event.row);
                 }
             }

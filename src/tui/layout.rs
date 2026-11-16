@@ -35,11 +35,11 @@ pub fn compute_layout(area: Rect) -> AppLayout {
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Header
-                Constraint::Length(3),  // Quit Button row + mobile status
+                Constraint::Length(3),      // Header
+                Constraint::Length(3),      // Quit Button row + mobile status
                 Constraint::Percentage(30), // Friends
                 Constraint::Percentage(70), // Chat window
-                Constraint::Length(3),  // Input prompt
+                Constraint::Length(3),      // Input prompt
             ])
             .split(area);
 
@@ -67,20 +67,17 @@ pub fn compute_layout(area: Rect) -> AppLayout {
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // Header
+                Constraint::Length(3), // Header
                 Constraint::Min(8),    // Middle (friends + network map)
-                Constraint::Length(3),  // Network status
+                Constraint::Length(3), // Network status
                 Constraint::Min(8),    // Chat window
-                Constraint::Length(3),  // Input prompt
+                Constraint::Length(3), // Input prompt
             ])
             .split(area);
 
         let middle_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(35),
-                Constraint::Percentage(65),
-            ])
+            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
             .split(main_chunks[1]);
 
         AppLayout {
@@ -95,4 +92,3 @@ pub fn compute_layout(area: Rect) -> AppLayout {
         }
     }
 }
-

@@ -43,8 +43,7 @@ pub fn encrypt_message(key: &[u8; 32], plaintext: &str) -> Result<String, String
 /// returning the plaintext string on success.
 pub fn decrypt_message(key: &[u8; 32], hex_payload: &str) -> Result<String, String> {
     // Decode the hex string back to binary
-    let combined = hex::decode(hex_payload)
-        .map_err(|e| format!("Hex decode error: {}", e))?;
+    let combined = hex::decode(hex_payload).map_err(|e| format!("Hex decode error: {}", e))?;
 
     // Ensure the payload is at least as long as the 24-byte nonce
     if combined.len() < 24 {

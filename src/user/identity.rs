@@ -31,11 +31,8 @@ pub struct LocalIdentity {
 
 impl Drop for LocalIdentity {
     fn drop(&mut self) {
-        // Zero the secret seed using volatile writes to prevent
-        // compiler optimizations from eliding the zeroing
-        for byte in self.secret_seed.iter_mut() {
-            unsafe { std::ptr::write_volatile(byte, 0u8) };
-        }
+        use zeroize::Zeroize;
+        self.secret_seed.zeroize();
     }
 }
 
@@ -58,10 +55,11 @@ impl LocalIdentity {
     /// Loads the identity from `~/.hopchat_id` or creates a new one
     pub fn load_or_create(raw_username: &str) -> Self {
         // Defense-in-Depth: Sanitize even if the caller already did.
-        let safe_username: String = raw_username.chars()
+        let safe_username: String = raw_username
+            .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect();
-            
+
         let username = if safe_username.is_empty() {
             "anon".to_string()
         } else {
@@ -71,25 +69,37 @@ impl LocalIdentity {
         let path = Self::get_path(&username);
 
         if path.exists() {
-            if let Ok(data) = fs::read_to_string(&path) {
-                if let Ok(mut identity) = serde_json::from_str::<LocalIdentity>(&data) {
-                    // Update username if they typed a new one, but keep the private key
-                    if identity.username != username {
-                        identity.username = username.to_string();
-                        identity.init_cached();
-                        identity.save();
-                    } else {
-                        identity.init_cached();
+            match fs::read_to_string(&path) {
+                Ok(data) => match serde_json::from_str::<LocalIdentity>(&data) {
+                    Ok(mut identity) => {
+                        // Update username if they typed a new one, but keep the private key
+                        if identity.username != username {
+                            identity.username = username.to_string();
+                            identity.init_cached();
+                            identity.save();
+                        } else {
+                            identity.init_cached();
+                        }
+                        return identity;
                     }
-                    return identity;
-                }
+                    Err(e) => eprintln!(
+                        "[hopchat] identity file {} is corrupt ({}); generating a new identity",
+                        path.display(),
+                        e
+                    ),
+                },
+                Err(e) => eprintln!(
+                    "[hopchat] could not read identity file {}: {}; generating a new identity",
+                    path.display(),
+                    e
+                ),
             }
         }
 
         // Generate a new long-term Ed25519 identity
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
-        
+
         let mut seed = [0u8; 32];
         seed.copy_from_slice(signing_key.to_bytes().as_slice());
 
@@ -106,15 +116,24 @@ impl LocalIdentity {
     }
 
     /// Returns our public key hex for transmitting in handshakes.
-    /// Uses the cached verifying key — no re-derivation.
+    /// Uses the cached verifying key, deriving it only if the cache is absent.
     pub fn public_key_hex(&self) -> String {
-        hex::encode(self.verifying_key.as_ref().expect("init_cached not called").to_bytes())
+        let bytes = match &self.verifying_key {
+            Some(verifying_key) => verifying_key.to_bytes(),
+            None => SigningKey::from_bytes(&self.secret_seed)
+                .verifying_key()
+                .to_bytes(),
+        };
+        hex::encode(bytes)
     }
 
     /// Signs a payload (like the ephemeral X25519 key) to prove identity ownership.
-    /// Uses the cached signing key — no re-derivation.
+    /// Uses the cached signing key, deriving it only if the cache is absent.
     pub fn sign_payload(&self, payload: &[u8]) -> String {
-        let signature = self.signing_key.as_ref().expect("init_cached not called").sign(payload);
+        let signature = match &self.signing_key {
+            Some(signing_key) => signing_key.sign(payload),
+            None => SigningKey::from_bytes(&self.secret_seed).sign(payload),
+        };
         hex::encode(signature.to_bytes())
     }
 
@@ -151,7 +170,20 @@ impl LocalIdentity {
     /// This is a truncated SHA-256 hash of the persistent Ed25519 public key,
     /// used by the UI to display a "Security Code" for out-of-band verification.
     pub fn tofu_fingerprint(&self) -> String {
-        self.tofu.clone().expect("init_cached not called")
+        if let Some(fingerprint) = &self.tofu {
+            return fingerprint.clone();
+        }
+
+        let verifying_key = match &self.verifying_key {
+            Some(key) => key.to_bytes(),
+            None => SigningKey::from_bytes(&self.secret_seed)
+                .verifying_key()
+                .to_bytes(),
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(verifying_key);
+        let digest = hex::encode(hasher.finalize());
+        digest[..16].to_string()
     }
 
     fn get_path(username: &str) -> PathBuf {
@@ -161,11 +193,17 @@ impl LocalIdentity {
     }
 
     fn save(&self) {
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            // This file holds the long-term signing seed: 0600 on every write,
-            // not only when it is first created.
-            let _ = crate::user::write_private_file(&Self::get_path(&self.username), json.as_bytes());
+        let json = match serde_json::to_string_pretty(self) {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("[hopchat] could not serialize identity: {}", e);
+                return;
+            }
+        };
+        // This file holds the long-term signing seed: 0600 on every write,
+        // not only when it is first created.
+        if let Err(e) = crate::user::write_private_file(&Self::get_path(&self.username), json.as_bytes()) {
+            eprintln!("[hopchat] could not write identity: {}", e);
         }
     }
 }
-
