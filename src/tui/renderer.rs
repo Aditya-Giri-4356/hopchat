@@ -403,9 +403,12 @@ fn render_input(frame: &mut Frame, area: Rect, input: &str, cursor_pos: usize) {
     let input_widget = Paragraph::new(text).block(block);
     frame.render_widget(input_widget, area);
 
-    // Render cursor
+    // Render cursor clamped to input bounds and accounting for unicode display width
+    let cursor_col = Line::from(input.chars().take(cursor_pos).collect::<String>()).width();
+    let max_x = area.x.saturating_add(area.width.saturating_sub(2));
+    let cursor_x = (area.x.saturating_add(3).saturating_add(cursor_col as u16)).min(max_x);
     frame.set_cursor(
-        area.x + 3 + cursor_pos as u16, // +3 for "> " prefix and border
+        cursor_x,
         area.y + 1,
     );
 }

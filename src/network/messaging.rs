@@ -702,8 +702,12 @@ pub async fn listen_for_messages(
                     if let Ok(ack_id) = ack_id.parse::<u64>() {
                         let mut reg = ack_registry.lock().await;
                         // Only the host we actually sent to may complete the send.
-                        if let Some((expected, tx)) = reg.remove(&ack_id) {
-                            if expected.ip() == ip {
+                        // We must only remove the entry if the source IP matches,
+                        // otherwise a spoofed packet from another IP would evict
+                        // the pending ACK and cause genuine delivery to fail.
+                        if let std::collections::hash_map::Entry::Occupied(entry) = reg.entry(ack_id) {
+                            if entry.get().0.ip() == ip {
+                                let (_, tx) = entry.remove();
                                 let _ = tx.send(());
                             }
                         }
@@ -1049,5 +1053,46 @@ mod security_tests {
         assert!(window.check_and_accept(200));
         assert!(!window.check_and_accept(100), "windowed id accepted twice");
         assert!(!window.check_and_accept(10), "expired id accepted");
+    }
+
+    // --- ACK registry eviction safety ------------------------------------
+
+    #[tokio::test]
+    async fn ack_from_unmatched_ip_does_not_evict_pending_sender() {
+        let registry: AckRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = oneshot::channel();
+        let expected_addr: SocketAddr = "192.168.1.50:8888".parse().unwrap();
+        let spoofed_ip: IpAddr = "192.168.1.99".parse().unwrap();
+
+        registry.lock().await.insert(42, (expected_addr, tx));
+
+        // Attempt ack from spoofed IP
+        {
+            let mut reg = registry.lock().await;
+            if let std::collections::hash_map::Entry::Occupied(entry) = reg.entry(42) {
+                if entry.get().0.ip() == spoofed_ip {
+                    let (_, tx) = entry.remove();
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        // Sender must still be in registry and unfulfilled
+        assert!(registry.lock().await.contains_key(&42));
+        assert!(matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+
+        // Now from legitimate IP
+        {
+            let mut reg = registry.lock().await;
+            if let std::collections::hash_map::Entry::Occupied(entry) = reg.entry(42) {
+                if entry.get().0.ip() == expected_addr.ip() {
+                    let (_, tx) = entry.remove();
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        assert!(!registry.lock().await.contains_key(&42));
+        assert!(matches!(rx.try_recv(), Ok(())));
     }
 }

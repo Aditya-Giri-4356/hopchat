@@ -574,6 +574,7 @@ impl Reassembler {
         }
         if self.buffer.len() + payload.len() > MAX_PACKET_BYTES {
             self.active = false;
+            self.buffer.clear();
             return None;
         }
 
