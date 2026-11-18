@@ -48,7 +48,7 @@ elif [ -f /etc/alpine-release ] || grep -q "Alpine" /etc/issue 2>/dev/null; then
     
     # Fallback to current version if API limit is hit or resolution fails
     if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-        LATEST_TAG="v2.1.1"
+        LATEST_TAG="v2.5.0"
     fi
     echo "[+] Target release: $LATEST_TAG"
 

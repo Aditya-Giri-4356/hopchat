@@ -11,6 +11,12 @@ Tactical Deployment: Read about the viability of HOPCHAT in contested Military a
 
 ---
 
+## Demo
+
+![HOPCHAT v2.5.0 Terminal Demo](assets/hopchat-demo.gif)
+
+---
+
 ## Repository Structure & Versions
 
 This repository contains two versions of HopChat to preserve development history and allow comparison:
@@ -117,6 +123,56 @@ cargo install --path . # Safely compiles and places binary in ~/.cargo/bin witho
 cargo install --git https://github.com/Aditya-Giri-4356/hopchat.git
 ```
 *Note: Ensure `~/.cargo/bin` is in your environment PATH.*
+
+---
+
+## Updating an Existing Installation
+
+To update your existing HopChat installation to the latest version:
+
+### Option 1: Re-run the Quick Installer (All Platforms)
+The installer script automatically detects your platform, downloads or compiles the latest release, and updates your binary:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Aditya-Giri-4356/hopchat/master/install.sh | sh
+```
+
+### Option 2: Cargo Update (macOS, Linux, Android Termux)
+If you installed via Cargo, pass the `--force` flag to overwrite your existing binary with the latest code from `master`:
+```bash
+# macOS & Linux
+cargo install --git https://github.com/Aditya-Giri-4356/hopchat.git --force
+
+# Android Termux
+cargo install --git https://github.com/Aditya-Giri-4356/hopchat.git --root "$PREFIX" --force
+```
+
+### Option 3: From a Local Git Clone
+If you previously cloned the repository:
+```bash
+cd hopchat
+git pull origin master
+cargo install --path . --force
+```
+
+### Option 4: iOS / iSH Terminal (Pre-built i586 Binary)
+Download and replace the binary with the latest release asset:
+```bash
+curl -LO https://github.com/Aditya-Giri-4356/hopchat/releases/latest/download/hopchat-ish
+chmod +x hopchat-ish
+mv -f hopchat-ish /usr/local/bin/hopchat
+```
+
+### Verify Update
+Confirm you are running the latest version:
+```bash
+hopchat --version
+# Expected: hopchat v2.5.0
+```
+
+> [!NOTE]
+> **Data & Identity Persistence:** Updating HopChat preserves your long-term Ed25519 identity keys (`~/.hopchat_id_<username>`) and your pinned peer database (`~/.hopchat_trust_db`). They are never deleted or modified during an update.
+>
+> *Handshake Note:* Version 2.4.0+ hardened the cryptographic handshake signature format by binding the username and X25519 key together. Ensure all communicating peers update to v2.4.0+ so sessions establish properly.
 
 ---
 
