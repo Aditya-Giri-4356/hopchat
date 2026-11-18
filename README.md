@@ -247,21 +247,97 @@ HopChat automatically scales to fit mobile screen resolutions. It also includes 
 - **Desktop**: Close the app via `Ctrl+C` or `ESC`.
 - **Mobile**: A dedicated, touchable **`[ QUIT ]`** button is rendered directly in the Terminal UI. Simply tap the button on your touchscreen to safely exit the app without needing to open your virtual keyboard's control ribbon.
 
-### Commands
+### Commands & Usage Reference
 
-Inside the chat buffer, you can execute special slash commands:
+Inside the HopChat message buffer, type `/` to access commands. HopChat intercepts commands starting with `/` before they can be sent as chat messages.
 
-- `/help` - Show the contextual help menu.
-- `/scan` - Launch the Interactive Subnet Scanner (especially useful on mobile).
-- `/nearby` - Open the Nearby window, the same list the scanner gives you.
-- `/peers` - List all currently active peers, along with their resolved local IP addresses and whether each is linked over Wi-Fi, Bluetooth, or both.
-- `/wifi [on|off|status|scan]` - Show the active IPv4 interfaces and the subnets being swept, pause/resume LAN announcements, or open the scanner. Receiving from peers who already know your address still works while announcements are paused.
-- `/bluetooth [on|off|status|scan]` - Show the radio state and authenticated links, or pause/resume BLE advertising and scanning. On iSH this reports that Bluetooth is unavailable instead of pretending.
-- `/connect <ip> [port]` - Manually fire a handshake to a specific address. The port is optional and defaults to the peer's advertised one. (The Subnet Scanner is highly recommended over this).
-- `/trust` - Show the identity keys pinned for your peers so far.
-- `/unpin <username>` - Forget a pinned key. Use this when a peer reinstalls and comes back with a new identity; otherwise the old pin rejects them.
-- `/clear` - Clear the conversation you are currently looking at.
-- `/quit` - Safely exit the application. Alternatively, tap the **`[ QUIT ]`** button on mobile.
+| Command | Arguments | Aliases | Purpose |
+|---|---|---|---|
+| `/help` | — | — | Displays the interactive command menu and contextual usage guide. |
+| `/scan` | — | `/nearby` | Launches the interactive Subnet Scanner overlay to actively search for nearby peers. |
+| `/peers` | — | — | Lists all known peers, their local IPs, and their active link state (Wi-Fi, BLE, or both). |
+| `/wifi` | `[status\|on\|off\|scan]` | — | Views active network interfaces, derived `/24` subnets, or toggles LAN announcements. |
+| `/bluetooth` | `[status\|on\|off\|scan]` | `/ble` | Checks BLE radio state, active links, or toggles BLE advertising & scanning. |
+| `/connect` | `<ip> [port]` | — | Manually initiates an encrypted Diffie-Hellman handshake to a target IP and port. |
+| `/trust` | — | — | Displays all pinned TOFU (Trust-On-First-Use) Ed25519 identity key fingerprints. |
+| `/unpin` | `<username>` | — | Forgets a peer's pinned identity key to allow re-pairing after a peer reinstall. |
+| `/clear` | — | — | Clears the message history of the currently selected conversation (or GLOBAL). |
+| `/quit` | — | — | Safely exits the application and restores the terminal. |
+
+---
+
+#### Detailed Command Guide
+
+* **`/help`**
+  * **Description**: Displays the in-app help menu with all available commands directly in your system message log.
+  * **Use Case**: Quick syntax reference while inside the chat interface.
+
+* **`/scan`** *(or `/nearby`)*
+  * **Description**: Opens the Subnet Scanner overlay. Automatically calculates the `/24` subnet of your active network interface and sweeps across all 254 host addresses on both discovery (9877) and chat (9878) ports.
+  * **Use Case**: Discovering peers on mobile (iOS iSH, Android Termux) or networks where standard UDP broadcast (`255.255.255.255`) is blocked by the router or hotspot.
+  * **Shortcut**: Desktop users can also press **`Tab`** to toggle this overlay.
+
+* **`/peers`**
+  * **Description**: Outputs a real-time list of all discovered and connected nodes, displaying:
+    * Peer username
+    * Connection medium (`connected: LAN`, `connected: Bluetooth`, `connected: LAN + Bluetooth`, `connecting`, or `offline`)
+    * Resolved local IP address
+  * **Use Case**: Verifying which physical network paths are alive between you and your peers.
+
+* **`/wifi [status | on | off | scan]`**
+  * **Syntax**:
+    * `/wifi` or `/wifi status`: Displays primary IP address, detected Wi-Fi interface (e.g. `en0`, `wlan0`), all non-loopback IPv4 interfaces, and the derived subnet sweep range.
+    * `/wifi off`: Pauses outgoing UDP discovery broadcasts while keeping the UDP receiver alive (allowing peers who already know your address to reach you silently).
+    * `/wifi on`: Resumes outgoing UDP presence broadcasts.
+    * `/wifi scan`: Triggers a full `/24` subnet discovery sweep.
+  * **Use Case**: Managing radio emissions in tactical/low-observability settings or diagnosing multi-NIC laptops.
+
+* **`/bluetooth [status | on | off | scan]`** *(Aliases: `/ble`)*
+  * **Syntax**:
+    * `/bluetooth` or `/bluetooth status`: Shows whether Bluetooth LE is supported, adapter power state, GATT advertising status, background scanning status, and list of linked peers.
+    * `/bluetooth off`: Shuts down the local GATT peripheral advertiser and central scanner.
+    * `/bluetooth on`: Resumes BLE advertising and scanning.
+    * `/bluetooth scan`: Checks current BLE scanner health and link count.
+  * **Use Case**: Verifying direct off-grid device-to-device connectivity when no router or hotspot is present. *(Note: Reported as unavailable on 32-bit iSH due to iOS kernel sandbox limitations).*
+
+* **`/connect <ip> [port]`**
+  * **Syntax**: `/connect 192.168.1.42` or `/connect 192.168.1.42 9879`
+  * **Description**: Directly fires a signed Ed25519 discovery packet and X25519 key exchange payload to the specified host and port (defaulting to port 9878 if omitted).
+  * **Use Case**: Connecting across subnets, routed VPNs, local VM bridges, or between two local instances on custom ports.
+
+* **`/trust`**
+  * **Description**: Lists all peer usernames and their pinned 16-character Ed25519 public key fingerprints stored in your local TOFU trust database (`~/.hopchat_trust_db`).
+  * **Use Case**: Out-of-band identity verification (comparing fingerprints verbally or via visual card) to ensure zero Man-in-the-Middle interference.
+
+* **`/unpin <username>`**
+  * **Syntax**: `/unpin bob`
+  * **Description**: Removes the pinned Ed25519 public key for the specified peer from your trust database.
+  * **Use Case**: When a peer uninstalls HopChat, generates a new cryptographic identity key, and attempts to reconnect. The old pin would reject them as a potential MITM; `/unpin` allows their new key to be pinned on next contact.
+
+* **`/clear`**
+  * **Description**: Clears the chat buffer for the conversation you are currently viewing. If chatting privately with a peer, only that peer's history is wiped; if no peer is selected, it clears the `GLOBAL` conversation.
+  * **Use Case**: Decluttering terminal message history without restarting the app.
+
+* **`/quit`**
+  * **Description**: Gracefully shuts down background Tokio network tasks, resets terminal raw mode, unhides the system cursor, and returns to the shell.
+  * **Use Case**: Safe exit without leaving corrupted terminal modes.
+
+---
+
+### Keybindings & Navigation Cheat Sheet
+
+| Key / Gesture | Action |
+|---|---|
+| **`Tab`** | Toggle the Subnet Scanner overlay (on / off) |
+| **`Esc`** | Close open overlays (Subnet Scanner), or exit if no overlay is active |
+| **`Up` / `Down`** | Navigate through peers in the FRIENDS list or Subnet Scanner |
+| **`Enter`** | Send message in input buffer, or select peer in scanner |
+| **`Left` / `Right`** | Move input cursor left/right by character |
+| **`Home` / `End`** | Jump input cursor to start or end of text |
+| **`Delete`** | Delete character forward from cursor |
+| **`Backspace`** | Delete character backward from cursor |
+| **`Ctrl + C`** | Immediate safe application exit |
+| **Mouse / Touch** | Tap **`[ QUIT ]`** button to exit on touchscreen / mobile displays |
 
 ---
 
