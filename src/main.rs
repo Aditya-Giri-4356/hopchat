@@ -1,5 +1,5 @@
 // =============================================================================
-// HOPCHAT v2.5.0 — Main Entry Point
+// HOPCHAT v2.5.1 — Main Entry Point
 // =============================================================================
 //
 // Orchestrates all subsystems:
@@ -99,7 +99,7 @@ pub struct AppState {
 /// Sanitizes input to prevent pipe-injection attacks on the discovery protocol.
 fn prompt_username() -> String {
     print!("\n  ╔══════════════════════════════════╗\n");
-    println!("  ║        HOPCHAT v2.5.0            ║");
+    println!("  ║        HOPCHAT v2.5.1            ║");
     println!("  ╠══════════════════════════════════╣");
     println!("  ║  Enter your username:            ║");
     println!("  ╚══════════════════════════════════╝");

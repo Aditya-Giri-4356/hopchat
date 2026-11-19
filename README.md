@@ -1,6 +1,6 @@
 # HOPCHAT
 
-**Status: Production-Hardened (v2.5.0)**
+**Status: Production-Hardened (v2.5.1)**
 
 
 HOPCHAT is a lightweight, decentralized, deeply encrypted terminal messenger written in Rust. It enables real-time peer-to-peer texting across local networks, isolated WiFi environments, phone hotspots, and direct Bluetooth LE links—no internet access required.
@@ -13,7 +13,7 @@ Tactical Deployment: Read about the viability of HOPCHAT in contested Military a
 
 ## Demo
 
-![HOPCHAT v2.5.0 Terminal Demo](assets/hopchat-demo.gif)
+![HOPCHAT v2.5.1 Terminal Demo](assets/hopchat-demo.gif)
 
 ---
 
@@ -166,7 +166,7 @@ mv -f hopchat-ish /usr/local/bin/hopchat
 Confirm you are running the latest version:
 ```bash
 hopchat --version
-# Expected: hopchat v2.5.0
+# Expected: hopchat v2.5.1
 ```
 
 > [!NOTE]
@@ -188,7 +188,7 @@ cargo run --release
 
 ### Command-Line Arguments
 
-HopChat v2.5.0 supports zero-dependency CLI arguments:
+HopChat v2.5.1 supports zero-dependency CLI arguments:
 
 ```bash
 Usage: hopchat [OPTIONS]

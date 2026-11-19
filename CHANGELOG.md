@@ -2,6 +2,34 @@
 
 ---
 
+## v2.5.1 — Security Hardening, TUI Refinements & Documentation (2026-11-20)
+
+### 🛡️ Security & Protocol Hardening
+
+* **Off-path UDP ACK protection** — `ack_registry` entry removal is now guarded by matching
+  the sender's source IP against the expected destination IP before evicting the channel
+  sender. A forged UDP ACK from an unrelated host can no longer evict the channel and
+  falsely mark genuine deliveries as failed.
+* **BLE reassembler buffer management** — in `Reassembler::push`, packets that exceed
+  `MAX_PACKET_BYTES` (16 KiB) now explicitly clear the internal buffer on overflow,
+  preventing stale partial fragment retention until timeout.
+* **TUI unicode cursor clamping** — cursor positioning in the message input widget now
+  measures display width via `Line::width()` and clamps against widget bounding boxes,
+  preventing visual cursor escape on wide unicode/CJK characters or narrow viewports.
+
+### 📚 Documentation & Media
+
+* **Live dual-terminal demonstration GIF** — recorded and added split-screen animation
+  (`assets/hopchat-demo.gif`) demonstrating end-to-end P2P discovery, encrypted key
+  exchange, and real-time message exchange between Alice and Bob.
+* **Full command & keybinding reference** — added complete table and detailed documentation
+  for all slash commands (`/help`, `/scan`, `/nearby`, `/peers`, `/wifi`, `/bluetooth`,
+  `/connect`, `/trust`, `/unpin`, `/clear`, `/quit`) and keyboard/touch navigation.
+* **Installation and update instructions** — documented multi-platform update procedures
+  in `README.md` and updated `install.sh` fallback release tag.
+
+---
+
 ## v2.5.0 — Bluetooth LE Transport and Wi-Fi Controls (2026-11-17)
 
 HopChat can now reach a peer without a shared IP network, and the LAN path is visible and
